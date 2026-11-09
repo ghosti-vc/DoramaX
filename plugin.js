@@ -99,6 +99,7 @@ export async function home() {
   await null; // por si algo de abajo lanza: nunca antes del primer await
   const defs = [
     { id: "td-emision", title: tr("En emisión", "Airing"), path: "/genero/emision/", genre: "series" },
+    { id: "td-latino", title: tr("En Latino", "In Latin Spanish"), path: "/genero/espanol-latino/", genre: "series" },
     { id: "td-kdramas", title: tr("K-Dramas", "K-Dramas"), path: "/genero/series/", genre: "series" },
     { id: "td-peliculas", title: tr("Películas", "Movies"), path: "/genero/peliculas/", genre: "peliculas" },
   ];
