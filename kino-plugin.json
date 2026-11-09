@@ -1,17 +1,25 @@
 {
   "id": "doramax",
   "name": "DoramaX",
-  "description": "K-dramas en español de TuDorama: En emisión, K-Dramas, películas y búsqueda. Solo catálogo.",
+  "description": "K-dramas en español de TuDorama: En emisión, K-Dramas, películas y búsqueda, con reproducción.",
   "author": "Ghosti-vc",
-  "version": "1.0.1",
-  "apiVersion": 8,
+  "version": "1.1.0",
+  "apiVersion": 9,
   "entry": "plugin.js",
   "icon": "icon.png",
-  "catalogOnly": true,
-  "capabilities": ["home", "search", "resolve"],
+  "capabilities": [
+    "home",
+    "search",
+    "episodes",
+    "resolve"
+  ],
   "hosts": [
     "tudorama.com",
     "www.tudorama.com",
+    "cdn.tudorama.com",
     "image.tmdb.org"
-  ]
+  ],
+  "browser": true,
+  "fetchHosts": "any",
+  "streamHosts": "any"
 }
