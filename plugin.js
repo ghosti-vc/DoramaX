@@ -90,6 +90,16 @@ function cards(html) {
   return items;
 }
 
+// Secciones del sitio; "ref" de una fila o mosaico = la clave de aquí.
+const SECTIONS = {
+  emision: { path: "/genero/emision/", genre: "series" },
+  latino: { path: "/genero/espanol-latino/", genre: "series" },
+  kdramas: { path: "/genero/series/", genre: "series" },
+  peliculas: { path: "/genero/peliculas/", genre: "peliculas" },
+};
+const CAT_VIEW = 60;  // títulos por tanda de "Ver más"
+const CAT_MAX = 100;  // tope de Kino por página
+
 async function listPage(path) {
   const html = await getHtml(TD + path);
   return cards(html);
@@ -98,21 +108,83 @@ async function listPage(path) {
 export async function home() {
   await null; // por si algo de abajo lanza: nunca antes del primer await
   const defs = [
-    { id: "td-emision", title: tr("En emisión", "Airing"), path: "/genero/emision/", genre: "series" },
-    { id: "td-latino", title: tr("En Latino", "In Latin Spanish"), path: "/genero/espanol-latino/", genre: "series" },
-    { id: "td-kdramas", title: tr("K-Dramas", "K-Dramas"), path: "/genero/series/", genre: "series" },
-    { id: "td-peliculas", title: tr("Películas", "Movies"), path: "/genero/peliculas/", genre: "peliculas" },
+    { id: "td-latino", ref: "latino", title: tr("En Latino", "In Latin Spanish"), path: "/genero/espanol-latino/", genre: "series" },
+    { id: "td-emision", ref: "emision", title: tr("En emisión", "Airing"), path: "/genero/emision/", genre: "series" },
+    { id: "td-kdramas", ref: "kdramas", title: tr("K-Dramas", "K-Dramas"), path: "/genero/series/", genre: "series" },
+    { id: "td-peliculas", ref: "peliculas", title: tr("Películas", "Movies"), path: "/genero/peliculas/", genre: "peliculas" },
   ];
   const res = await Promise.allSettled(defs.map((d) => listPage(d.path)));
   const rows = [];
   res.forEach((r, i) => {
     if (r.status !== "fulfilled") { log("home: falló " + defs[i].id); return; }
     const items = r.value.slice(0, HOME_ROW);
-    if (items.length) rows.push({ id: defs[i].id, title: defs[i].title, genre: defs[i].genre, items });
+    if (items.length) rows.push({ id: defs[i].id, title: defs[i].title, genre: defs[i].genre, ref: defs[i].ref, items });
   });
   log("home filas=" + rows.length);
   if (!rows.length) throw kino.error("unavailable", "inicio sin resultados");
   return rows;
+}
+
+// Una página de una sección: /genero/<x>/ (+ page/N/).
+async function sectionPage(ref, n) {
+  const sec = SECTIONS[ref];
+  const html = await getHtml(TD + sec.path + (n > 1 ? "page/" + n + "/" : ""));
+  return { items: cards(html), hasNext: html.indexOf("/page/" + (n + 1) + "/") !== -1 };
+}
+
+// "Ver más" y catálogos: el cursor es el número de página; cada tanda junta varias páginas.
+export async function browse(ref, cursor) {
+  await null;
+  const r = String(ref || "");
+  if (!SECTIONS[r]) throw kino.error("not_found", "catálogo desconocido");
+  const n = Math.max(1, parseInt(cursor, 10) || 1);
+  const items = [];
+  const seen = new Set();
+  let p = n;
+  let last = n - 1;
+  let hasNext = true;
+  let rounds = 0;
+  while (hasNext && items.length < CAT_VIEW && rounds < 3) {
+    rounds++;
+    const batch = await Promise.allSettled([0, 1, 2].map((k) => sectionPage(r, p + k)));
+    let stop = false;
+    for (let k = 0; k < batch.length; k++) {
+      const res = batch[k];
+      if (res.status !== "fulfilled") {
+        if (last < n) throw res.reason; // ni la primera página cargó: error de verdad
+        stop = true;
+        break;
+      }
+      const fresh = res.value.items.filter((x) => !seen.has(x.id));
+      if (items.length && items.length + fresh.length > CAT_MAX) { stop = true; break; }
+      for (const x of fresh) { seen.add(x.id); items.push(x); }
+      last = p + k;
+      hasNext = res.value.hasNext;
+      if (!hasNext || items.length >= CAT_VIEW) { stop = true; break; }
+    }
+    if (stop) break;
+    p += 3;
+  }
+  const page = { items: items.slice(0, CAT_MAX) };
+  if (hasNext && items.length) page.next = String(last + 1);
+  return page;
+}
+
+// Mosaicos de la sección Categorías; cada uno abre browse(ref, null).
+export async function categories() {
+  await null;
+  const defs = [
+    { id: "latino", title: tr("En Latino", "In Latin Spanish") },
+    { id: "emision", title: tr("En emisión", "Airing") },
+    { id: "kdramas", title: tr("K-Dramas", "K-Dramas") },
+    { id: "peliculas", title: tr("Películas", "Movies") },
+  ];
+  const first = await Promise.allSettled(defs.map((d) => sectionPage(d.id, 1)));
+  return defs.map((d, i) => {
+    const r = first[i];
+    const art = r.status === "fulfilled" && r.value.items[0] ? r.value.items[0].poster : undefined;
+    return art ? { id: d.id, title: d.title, ref: d.id, art } : { id: d.id, title: d.title, ref: d.id };
+  });
 }
 
 export async function search(query) {
