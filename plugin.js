@@ -233,31 +233,6 @@ function normTitle(t) {
     .replace(/\blatino\b/g, "").replace(/[^a-z0-9]+/g, "");
 }
 
-// Junta los títulos repetidos (mismo nombre, aunque vengan de fuentes distintas) en UNA sola tarjeta.
-// La tarjeta conserva todas las direcciones ("mx|a||b"); al abrirla, episodes() elige la que tenga más capítulos.
-const SRC_PRIO = { td: 0, dl: 1, dy: 2 };
-function mergeDupes(items) {
-  const groups = new Map();
-  const order = [];
-  for (const x of items) {
-    const k = normTitle(x.title) || x.id;
-    let g = groups.get(k);
-    if (!g) { g = []; groups.set(k, g); order.push(k); }
-    g.push(x);
-  }
-  return order.map((k) => {
-    const g = groups.get(k);
-    if (g.length === 1) return g[0];
-    g.sort((a, b) => (SRC_PRIO[a.ref.slice(0, 2)] || 0) - (SRC_PRIO[b.ref.slice(0, 2)] || 0));
-    const first = Object.assign({}, g[0]);
-    if (!first.poster) { const p = g.find((y) => y.poster); if (p) first.poster = p.poster; }
-    const refs = [];
-    for (const y of g) if (refs.indexOf(y.ref) < 0) refs.push(y.ref);
-    if (refs.length > 1) first.ref = "mx|" + refs.join("||");
-    return first;
-  });
-}
-
 // Una página de una sección: pide todas sus fuentes a la vez, intercala sus títulos (uno de cada una,
 // por turnos) y quita los repetidos. Si una fuente falla o ya no tiene esa página, se sigue con las demás.
 async function sectionPage(ref, n) {
@@ -266,12 +241,19 @@ async function sectionPage(ref, n) {
   const ok = res.filter((r) => r.status === "fulfilled");
   if (!ok.length) throw res[0].reason;
   const lists = ok.map((r) => r.value.items);
-  const mixed = [];
+  const items = [];
+  const seen = new Set();
   const longest = Math.max.apply(null, lists.map((l) => l.length));
   for (let i = 0; i < longest; i++) {
-    for (const l of lists) if (l[i]) mixed.push(l[i]);
+    for (const l of lists) {
+      const x = l[i];
+      if (!x) continue;
+      const k = normTitle(x.title) || x.id;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      items.push(x);
+    }
   }
-  const items = mergeDupes(mixed);
   return { items, hasNext: ok.some((r) => r.value.hasNext) };
 }
 
@@ -341,12 +323,13 @@ export async function search(query) {
     getHtml(DL + "/?s=" + enc).then(dlCards),
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected") throw a.reason;
-  const all = [];
+  const out = [];
+  const seen = new Set();
   for (const r of [a, b, c]) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
-    for (const x of r.value) all.push(x);
+    for (const x of r.value) if (!seen.has(x.id)) { seen.add(x.id); out.push(x); }
   }
-  return mergeDupes(all).slice(0, MAX_RESULTS);
+  return out.slice(0, MAX_RESULTS);
 }
 
 // ---- Peticiones al servidor de WordPress (admin-ajax) -----------------------------------------
@@ -524,19 +507,6 @@ async function dlResolve(url) {
 export async function episodes(ref) {
   await null;
   const raw = String(ref || "");
-  // Tarjeta combinada: se piden las listas de todas las fuentes a la vez y gana la que tenga más capítulos.
-  if (raw.startsWith("mx|")) {
-    const refs = raw.slice(3).split("||").filter(Boolean).slice(0, 4);
-    const res = await Promise.allSettled(refs.map((r) => episodes(r)));
-    let best = null;
-    res.forEach((r, i) => {
-      if (r.status !== "fulfilled" || !r.value || !r.value.episodes) { log("episodes: falló " + refs[i].slice(0, 2)); return; }
-      log("episodes: " + refs[i].slice(0, 2) + "=" + r.value.episodes.length);
-      if (!best || r.value.episodes.length > best.episodes.length) best = r.value;
-    });
-    if (!best) throw res[0].reason || kino.error("not_found", "sin lista de episodios");
-    return best;
-  }
   if (raw.startsWith("dl|")) return dlEpisodes(raw.slice(3));
   if (raw.startsWith("dy|")) return dyEpisodes(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
