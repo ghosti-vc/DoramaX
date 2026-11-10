@@ -312,36 +312,169 @@ function hostOf(u) {
 
 // Forma de la ruta sin el código: /e/xxxx -> "/e/". Sirve para el registro sin filtrar enlaces.
 function pathShape(u) {
-  const m = /^https?:\/\/[^\/?#]+(\/[^?#]*)?/i.exec(String(u || "")); 
+  const m = /^https?:\/\/[^\/?#]+(\/[^?#]*)?/i.exec(String(u || ""));
   const p = m && m[1] ? m[1] : "";
   return p.replace(/[A-Za-z0-9_-]{8,}/g, "~").slice(0, 40);
-}
-
-// Lee la página de un reproductor embebido y busca el video escrito (.m3u8 / .mp4).
-async function embedFromHtml(embedUrl) {
-  const r = await kino.fetch(embedUrl, { headers: { Referer: TD + "/" } });
-  log("embed " + hostOf(embedUrl) + pathShape(embedUrl) + " status=" + r.status);
-  if (!r.ok) return null;
-  const html = await r.text();
-  const clean = html.replace(/\\\//g, "/");
-  const m = /["'`]((?:https?:)?\/\/[^"'`\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"'`\s<>\\]*)?)["'`]/i.exec(clean);
-  const title = /<title[^>]*>([^<]*)/i.exec(html);
-  const frames = [];
-  const fr = /<iframe[^>]*src=["']([^"']+)["']/gi;
-  let f;
-  while ((f = fr.exec(html)) && frames.length < 3) frames.push(hostOf(absUrl(f[1])) + pathShape(absUrl(f[1])));
-  log("embed bytes=" + html.length + " titulo=" + (title ? title[1].trim().slice(0, 50) : "-") + " video=" + (m ? "si" : "no") + " iframes=" + frames.join(","));
-  if (m) {
-    const u = absUrl(m[1]);
-    if (u) return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: embedUrl } };
-  }
-  return null;
 }
 
 function absUrl(u) {
   let x = String(u || "").trim();
   if (x.startsWith("//")) x = "https:" + x;
   return /^https:\/\//i.test(x) ? x : "";
+}
+
+// -- Lectura de reproductores embebidos ---------------------------------------------------------
+// Muchos reproductores esconden el video: dentro de un script "empaquetado" (eval(function(p,a,c,k,e,d)...)
+// o en un texto en base64 (atob). Aquí se desarman, sin ejecutar nada, para buscar el .m3u8 / .mp4.
+
+const MEDIA_RE = /["'`]((?:https?:)?\/\/[^"'`\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"'`\s<>\\]*)?)["'`]/i;
+
+function normText(s) {
+  return String(s || "").replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
+}
+
+// Desarma un script empaquetado con el método clásico "p,a,c,k,e,d".
+function unpackPacked(src) {
+  const re = /\}\s*\(\s*(['"])((?:\\[\s\S]|(?!\1)[^\\])*)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])((?:\\[\s\S]|(?!\5)[^\\])*)\5\s*\.split\(\s*['"]\|['"]\s*\)/;
+  const m = re.exec(src);
+  if (!m) return null;
+  const payload = m[2].replace(/\\(['"\\])/g, "$1").replace(/\\n/g, "\n");
+  const radix = Number(m[3]);
+  let count = Number(m[4]);
+  if (!(radix >= 2 && radix <= 62) || !(count > 0 && count < 100000)) return null;
+  const dict = m[6].split("|");
+  const enc = (c) => (c < radix ? "" : enc(Math.floor(c / radix))) + ((c = c % radix) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
+  const map = {};
+  while (count--) map[enc(count)] = dict[count] || enc(count);
+  return payload.replace(/\b\w+\b/g, (w) => (map[w] != null ? map[w] : w));
+}
+
+function unpackAll(html) {
+  const out = [];
+  let i = 0;
+  while (out.length < 4) {
+    const k = html.indexOf("eval(function(p,a,c,k,e", i);
+    if (k < 0) break;
+    const u = unpackPacked(html.slice(k, k + 80000));
+    if (u) out.push(u);
+    i = k + 20;
+  }
+  return out;
+}
+
+function base64Texts(html) {
+  const out = [];
+  const re = /atob\(\s*["']([A-Za-z0-9+\/=_-]{16,})["']\s*\)/g;
+  let m;
+  while ((m = re.exec(html)) && out.length < 6) {
+    try { out.push(atob(m[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (e) { /* no era base64 */ }
+  }
+  return out;
+}
+
+function findMedia(text) {
+  const m = MEDIA_RE.exec(normText(text));
+  return m ? absUrl(m[1]) : "";
+}
+
+// Igual, pero sin exigir comillas: el texto que sale de un base64 suele ser el enlace "pelado".
+function findMediaLoose(text) {
+  const m = /((?:https?:)?\/\/[^\s"'`<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'`<>\\]*)?)/i.exec(normText(text));
+  return m ? absUrl(m[1]) : "";
+}
+
+// Busca el video escrito en la página, en sus scripts empaquetados o en sus textos base64.
+function deepMedia(html) {
+  let u = findMedia(html);
+  if (u) return u;
+  for (const t of unpackAll(html)) { u = findMedia(t); if (u) return u; }
+  for (const t of base64Texts(html)) { u = findMediaLoose(t); if (u) return u; }
+  return "";
+}
+
+const SKIP_HOST = /(google|gstatic|facebook|doubleclick|googletagmanager|cloudflare|jsdelivr|cdnjs|jquery|bootstrap|fontawesome|histats|yandex)/i;
+
+// Enlaces a otras páginas de reproductor que esta página abre o inserta (iframes y textos de script).
+function embedLinks(html, base) {
+  const texts = [html].concat(unpackAll(html), base64Texts(html));
+  const out = [];
+  const add = (u) => {
+    const a = absUrl(u);
+    if (!a || a === base || out.indexOf(a) >= 0) return;
+    if (SKIP_HOST.test(hostOf(a))) return;
+    if (/\.(?:js|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf)(\?|$)/i.test(a)) return;
+    out.push(a);
+  };
+  const decoded = base64Texts(html);
+  for (const raw of texts) {
+    const t = normText(raw);
+    const fr = /<iframe[^>]*src=["']([^"']+)["']/gi;
+    let f;
+    while ((f = fr.exec(t))) add(f[1]);
+    const ur = /["'`]((?:https?:)?\/\/[^"'`\s<>\\]+)["'`]/g;
+    let u;
+    while ((u = ur.exec(t))) {
+      if (/\/(?:e|embed|v|f|play|player|stream|d)\/[A-Za-z0-9_-]{6,}/i.test(u[1])) add(u[1]);
+    }
+  }
+  // Lo que sale de un base64 suele ser el enlace "pelado", sin comillas.
+  for (const raw of decoded) {
+    const bare = /(?:https?:)?\/\/[^\s"'`<>\\]+/g;
+    let b;
+    while ((b = bare.exec(normText(raw)))) add(b[0]);
+  }
+  return out.slice(0, 4);
+}
+
+function redact(s) {
+  return String(s || "")
+    .replace(/https?:\/\/[^\s"'<>]+/g, (u) => hostOf(u) + pathShape(u))
+    .replace(/[A-Za-z0-9+\/=_-]{16,}/g, "~")
+    .replace(/\s+/g, " ")
+    .slice(0, 240);
+}
+
+// Radiografía de una página de reproductor para el registro (sin códigos ni enlaces completos).
+function diag(html, depth, found) {
+  const title = /<title[^>]*>([^<]*)/i.exec(html);
+  const scripts = [];
+  const sre = /<script([^>]*)>([\s\S]*?)<\/script>/gi;
+  let s;
+  while ((s = sre.exec(html))) scripts.push({ attrs: s[1], body: s[2] });
+  const ext = scripts.map((x) => attr("<s " + x.attrs + ">", "src")).filter(Boolean).map((x) => hostOf(absUrl(x))).filter(Boolean);
+  const inline = scripts.filter((x) => x.body.trim()).sort((a, b) => b.body.length - a.body.length);
+  const links = embedLinks(html, "").map((u) => hostOf(u) + pathShape(u));
+  log("embed[" + depth + "] bytes=" + html.length + " titulo=" + (title ? title[1].trim().slice(0, 40) : "-") +
+    " video=" + (found ? "si" : "no") + " packed=" + unpackAll(html).length + " atob=" + base64Texts(html).length +
+    " tagVideo=" + /<video[\s>]/i.test(html) + " iframes=" + (html.split("<iframe").length - 1) +
+    " scriptsExt=" + ext.slice(0, 4).join(",") + " scriptsInline=" + inline.length + " enlaces=" + links.join(","));
+  if (!found && inline.length) log("embed[" + depth + "] script mayor: " + redact(inline[0].body));
+}
+
+// Lee la página de un reproductor y busca el video; si no está, sigue los reproductores que esa
+// página abre (hasta 2 niveles), porque el de TuDorama suele ser solo una envoltura.
+async function embedFromHtml(embedUrl, depth, referer) {
+  const d = depth || 0;
+  const r = await kino.fetch(embedUrl, { headers: { Referer: referer || TD + "/" } });
+  log("embed[" + d + "] " + hostOf(embedUrl) + pathShape(embedUrl) + " status=" + r.status);
+  if (!r.ok) return null;
+  const html = await r.text();
+  const u = deepMedia(html);
+  diag(html, d, !!u);
+  if (u) {
+    return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: embedUrl } };
+  }
+  if (d >= 2) return null;
+  const links = embedLinks(html, embedUrl).slice(0, d === 0 ? 3 : 2);
+  for (const l of links) {
+    try {
+      const got = await embedFromHtml(l, d + 1, embedUrl);
+      if (got) return got;
+    } catch (e) {
+      log("embed[" + (d + 1) + "] falló: " + String((e && e.message) || e).slice(0, 60));
+    }
+  }
+  return null;
 }
 
 async function captureEmbed(embedUrl, ms) {
@@ -380,22 +513,22 @@ export async function resolve(ref) {
     });
   }
   // Español latino primero, luego subtitulado; dentro de cada idioma: Pixeldrain (enlace directo),
-  // otros directos, y al final los reproductores embebidos.
+  // otros directos, los reproductores embebidos y, al final, Abyss (el más difícil de abrir).
   const kindRank = (x) => {
-    const h = hostOf(absUrl(x.link || x.url));
+    const l = absUrl(x.link || x.url);
+    const h = hostOf(l);
     if (/(^|\.)pixeldrain\.(com|net)$/i.test(h)) return 0;
     if (x.type === "direct" || x.type === "video") return 1;
+    if (/abyss/i.test(l)) return 3;
     return 2;
   };
   list.sort((a, b) => ((a.lang === "es" ? 0 : 1) - (b.lang === "es" ? 0 : 1)) || (kindRank(a) - kindRank(b)));
   const label = (x) => (x.lang === "es" ? "Latino" : tr("Subtitulado", "Subbed")) + " · " + String(x.name || "").split(":")[0].trim();
-  const alts = [];
 
   let embedsDone = false;
   for (const x of list) {
     const link = absUrl(x.link || x.url);
     if (!link) continue;
-    const host = hostOf(link);
 
     // Pixeldrain: el archivo se pide directo en /api/file/<id>.
     const px = /pixeldrain\.(?:com|net)\/(?:u|api\/file)\/([A-Za-z0-9]+)/i.exec(link);
@@ -408,13 +541,13 @@ export async function resolve(ref) {
     }
 
     if (embedsDone) continue;
-    // Reproductores embebidos: se leen todos a la vez (hasta 3) y gana el primero, en orden de lista,
-    // que traiga el video escrito. Así no se espera uno por uno.
+    // Reproductores embebidos: se leen varios a la vez (hasta 4) y gana el primero, en orden de lista,
+    // que entregue el video. Así no se espera uno por uno.
     const embeds = list.filter((y) => {
       const l = absUrl(y.link || y.url);
       return l && y.type !== "direct" && y.type !== "video" && !/pixeldrain\.(?:com|net)\/(?:u|api\/file)\//i.test(l);
-    }).slice(0, 3);
-    const found = await Promise.allSettled(embeds.map((y) => embedFromHtml(absUrl(y.link || y.url))));
+    }).slice(0, 4);
+    const found = await Promise.allSettled(embeds.map((y) => embedFromHtml(absUrl(y.link || y.url), 0, TD + "/")));
     for (let k = 0; k < embeds.length; k++) {
       const r = found[k];
       if (r.status === "fulfilled" && r.value) { r.value.label = label(embeds[k]); return r.value; }
