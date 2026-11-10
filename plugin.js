@@ -1,8 +1,9 @@
-// DoramaX - catálogo de K-dramas en español (TuDorama y DoramasYT).
+// DoramaX - catálogo de K-dramas en español (TuDorama, DoramasYT y DoramasLat).
 // Reproduce desde los servidores del sitio (directos o con el navegador oculto).
 
 const TD = "https://tudorama.com";
 const DY = "https://www.doramasyt.com";
+const DL = "https://doramaslat.com";
 const HOME_ROW = 20;
 const MAX_RESULTS = 100;
 
@@ -92,14 +93,25 @@ function cards(html) {
 }
 
 // Secciones del sitio; "ref" de una fila o mosaico = la clave de aquí.
+// Cada sección junta varias fuentes: una sola fila/catálogo por nombre, sin repetir títulos.
+// site: "td" = TuDorama, "dy" = DoramasYT, "dl" = DoramasLat.
 const SECTIONS = {
-  emision: { path: "/genero/emision/", genre: "series" },
-  latino: { path: "/genero/espanol-latino/", genre: "series" },
-  kdramas: { path: "/genero/series/", genre: "series" },
-  peliculas: { path: "/genero/peliculas/", genre: "peliculas" },
-  // DoramasYT (site "dy"): el Latino se saca de la búsqueda "latino" (sus series en latino lo llevan en el nombre).
-  dylatino: { site: "dy", path: "/buscar?q=latino", genre: "series" },
-  dyemision: { site: "dy", path: "/emision", genre: "series" },
+  latino: { genre: "series", parts: [
+    { site: "td", path: "/genero/espanol-latino/" },
+    { site: "dy", path: "/buscar?q=latino" },   // sus series en latino llevan "latino" en el nombre
+    { site: "dl", path: "/tvshows/" },            // todo DoramasLat es en latino
+  ] },
+  emision: { genre: "series", parts: [
+    { site: "td", path: "/genero/emision/" },
+    { site: "dy", path: "/emision" },
+  ] },
+  kdramas: { genre: "series", parts: [
+    { site: "td", path: "/genero/series/" },
+  ] },
+  peliculas: { genre: "peliculas", parts: [
+    { site: "td", path: "/genero/peliculas/" },
+    { site: "dl", path: "/movies/" },
+  ] },
 };
 const CAT_VIEW = 60;  // títulos por tanda de "Ver más"
 const CAT_MAX = 100;  // tope de Kino por página
@@ -142,28 +154,57 @@ function dyCards(html) {
   return items;
 }
 
-async function listPage(path) {
-  const dy = path.startsWith("dy:");
-  const html = await getHtml((dy ? DY : TD) + (dy ? path.slice(3) : path));
-  return dy ? dyCards(html) : cards(html);
+// ---- DoramasLat (Dooplay): tarjetas ---------------------------------------------------------
+
+// Listas: <article class="item tvshows"> con <div class="poster"><img> y <h3><a href=".../tvshows/<slug>/">.
+// Búsqueda: <article> dentro de .result-item con <div class="title"><a>. Se leen los dos igual, bloque a bloque.
+function dlCards(html) {
+  const items = [];
+  const seen = new Set();
+  const parts = html.split(/<article/i).slice(1);
+  for (const raw of parts) {
+    const block = raw.split(/<\/article>/i)[0];
+    const a = /<a[^>]+href=["'](https:\/\/doramaslat\.com\/(tvshows|movies)\/([a-z0-9-]+)\/)["']/i.exec(block);
+    if (!a || seen.has(a[1])) continue;
+    const h = /<(?:h[1-6]|div)[^>]*(?:class=["'][^"']*title[^"']*["'])?[^>]*>\s*<a[^>]+href=["']https:\/\/doramaslat\.com\/(?:tvshows|movies)\/[^"']+["'][^>]*>([\s\S]*?)<\/a>/i.exec(block);
+    const img = /<img[^>]*>/i.exec(block);
+    let title = h ? stripTags(h[1]) : "";
+    let poster;
+    if (img) {
+      const ds = /data-(?:lazy-)?src=["']([^"']+)["']/i.exec(img[0]);
+      const sr = /\ssrc=["']([^"']+)["']/i.exec(img[0]);
+      poster = ds ? ds[1] : (sr ? sr[1] : undefined);
+      if (!title) { const al = /alt=["']([^"']+)["']/i.exec(img[0]); if (al) title = decodeEntities(al[1]); }
+    }
+    title = title.replace(/\s*[–-]\s*Doramas\s+Latino\s*$/i, "").trim();
+    if (!title) continue;
+    seen.add(a[1]);
+    items.push({
+      id: "dl-" + a[3].slice(0, 80),
+      ref: "dl|" + a[1],
+      title: title.slice(0, 200),
+      kind: a[2] === "movies" ? "movie" : "series",
+      genres: a[2] === "movies" ? ["peliculas", "drama"] : ["series", "drama"],
+      poster,
+    });
+  }
+  return items;
 }
 
 export async function home() {
   await null; // por si algo de abajo lanza: nunca antes del primer await
   const defs = [
-    { id: "td-latino", ref: "latino", title: tr("En Latino", "In Latin Spanish"), path: "/genero/espanol-latino/", genre: "series" },
-    { id: "td-emision", ref: "emision", title: tr("En emisión", "Airing"), path: "/genero/emision/", genre: "series" },
-    { id: "td-kdramas", ref: "kdramas", title: tr("K-Dramas", "K-Dramas"), path: "/genero/series/", genre: "series" },
-    { id: "td-peliculas", ref: "peliculas", title: tr("Películas", "Movies"), path: "/genero/peliculas/", genre: "peliculas" },
-    { id: "dy-latino", ref: "dylatino", title: tr("DoramasYT · Latino", "DoramasYT · Latin Spanish"), path: "dy:/buscar?q=latino", genre: "series" },
-    { id: "dy-emision", ref: "dyemision", title: tr("DoramasYT · En emisión", "DoramasYT · Airing"), path: "dy:/emision", genre: "series" },
+    { id: "row-latino", ref: "latino", title: tr("En Latino", "In Latin Spanish") },
+    { id: "row-emision", ref: "emision", title: tr("En emisión", "Airing") },
+    { id: "row-kdramas", ref: "kdramas", title: tr("K-Dramas", "K-Dramas") },
+    { id: "row-peliculas", ref: "peliculas", title: tr("Películas", "Movies") },
   ];
-  const res = await Promise.allSettled(defs.map((d) => listPage(d.path)));
+  const res = await Promise.allSettled(defs.map((d) => sectionPage(d.ref, 1)));
   const rows = [];
   res.forEach((r, i) => {
     if (r.status !== "fulfilled") { log("home: falló " + defs[i].id); return; }
-    const items = r.value.slice(0, HOME_ROW);
-    if (items.length) rows.push({ id: defs[i].id, title: defs[i].title, genre: defs[i].genre, ref: defs[i].ref, items });
+    const items = r.value.items.slice(0, HOME_ROW);
+    if (items.length) rows.push({ id: defs[i].id, title: defs[i].title, genre: SECTIONS[defs[i].ref].genre, ref: defs[i].ref, items });
   });
   log("home filas=" + rows.length);
   if (!rows.length) throw kino.error("unavailable", "inicio sin resultados");
@@ -171,15 +212,49 @@ export async function home() {
 }
 
 // Una página de una sección: /genero/<x>/ (+ page/N/).
-async function sectionPage(ref, n) {
-  const sec = SECTIONS[ref];
-  if (sec.site === "dy") {
-    const sep = sec.path.indexOf("?") >= 0 ? "&" : "?";
-    const html = await getHtml(DY + sec.path + (n > 1 ? sep + "page=" + n : ""));
+// Una página de una fuente concreta.
+async function partPage(part, n) {
+  if (part.site === "dy") {
+    const sep = part.path.indexOf("?") >= 0 ? "&" : "?";
+    const html = await getHtml(DY + part.path + (n > 1 ? sep + "page=" + n : ""));
     return { items: dyCards(html), hasNext: html.indexOf("page=" + (n + 1)) !== -1 };
   }
-  const html = await getHtml(TD + sec.path + (n > 1 ? "page/" + n + "/" : ""));
+  if (part.site === "dl") {
+    const html = await getHtml(DL + part.path + (n > 1 ? "page/" + n + "/" : ""));
+    return { items: dlCards(html), hasNext: html.indexOf("/page/" + (n + 1) + "/") !== -1 };
+  }
+  const html = await getHtml(TD + part.path + (n > 1 ? "page/" + n + "/" : ""));
   return { items: cards(html), hasNext: html.indexOf("/page/" + (n + 1) + "/") !== -1 };
+}
+
+// Para detectar el mismo título en fuentes distintas: sin acentos, sin "latino", solo letras y números.
+function normTitle(t) {
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\blatino\b/g, "").replace(/[^a-z0-9]+/g, "");
+}
+
+// Una página de una sección: pide todas sus fuentes a la vez, intercala sus títulos (uno de cada una,
+// por turnos) y quita los repetidos. Si una fuente falla o ya no tiene esa página, se sigue con las demás.
+async function sectionPage(ref, n) {
+  const sec = SECTIONS[ref];
+  const res = await Promise.allSettled(sec.parts.map((p) => partPage(p, n)));
+  const ok = res.filter((r) => r.status === "fulfilled");
+  if (!ok.length) throw res[0].reason;
+  const lists = ok.map((r) => r.value.items);
+  const items = [];
+  const seen = new Set();
+  const longest = Math.max.apply(null, lists.map((l) => l.length));
+  for (let i = 0; i < longest; i++) {
+    for (const l of lists) {
+      const x = l[i];
+      if (!x) continue;
+      const k = normTitle(x.title) || x.id;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      items.push(x);
+    }
+  }
+  return { items, hasNext: ok.some((r) => r.value.hasNext) };
 }
 
 // "Ver más" y catálogos: el cursor es el número de página; cada tanda junta varias páginas.
@@ -228,8 +303,6 @@ export async function categories() {
     { id: "emision", title: tr("En emisión", "Airing") },
     { id: "kdramas", title: tr("K-Dramas", "K-Dramas") },
     { id: "peliculas", title: tr("Películas", "Movies") },
-    { id: "dylatino", title: tr("DoramasYT · Latino", "DoramasYT · Latin Spanish") },
-    { id: "dyemision", title: tr("DoramasYT · En emisión", "DoramasYT · Airing") },
   ];
   const first = await Promise.allSettled(defs.map((d) => sectionPage(d.id, 1)));
   return defs.map((d, i) => {
@@ -244,14 +317,15 @@ export async function search(query) {
   const q = stripTags(query && query.q).slice(0, 100);
   if (!q) return [];
   const enc = encodeURIComponent(q);
-  const [a, b] = await Promise.allSettled([
+  const [a, b, c] = await Promise.allSettled([
     getHtml(TD + "/?s=" + enc).then(cards),
     getHtml(DY + "/buscar?q=" + enc).then(dyCards),
+    getHtml(DL + "/?s=" + enc).then(dlCards),
   ]);
-  if (a.status === "rejected" && b.status === "rejected") throw a.reason;
+  if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected") throw a.reason;
   const out = [];
   const seen = new Set();
-  for (const r of [a, b]) {
+  for (const r of [a, b, c]) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
     for (const x of r.value) if (!seen.has(x.id)) { seen.add(x.id); out.push(x); }
   }
@@ -352,9 +426,88 @@ async function dyResolve(url) {
   });
 }
 
+// ---- DoramasLat: episodios y reproducción -------------------------------------------------------
+
+async function dlEpisodes(url) {
+  const html = await getHtml(url);
+  const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html);
+  const og = /property=["']og:image["'][^>]*content=["']([^"']+)["']/i.exec(html);
+  const title = (h1 ? stripTags(h1[1]) : url).replace(/\s*[–-]\s*Doramas\s+Latino\s*$/i, "");
+  const poster = og ? og[1] : undefined;
+  if (/\/movies\//.test(url)) {
+    return { series: { title, poster }, episodes: [{ season: 1, number: 1, ref: "dl|" + url, title }] };
+  }
+  const eps = new Map();
+  const re = /<li[^>]*>[\s\S]*?<div class=['"]numerando['"]>\s*(\d+)\s*-\s*(\d+)\s*<\/div>[\s\S]*?<a href=['"](https:\/\/doramaslat\.com\/episodes\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    if (eps.has(m[3])) continue;
+    eps.set(m[3], { season: Number(m[1]) || 1, number: Number(m[2]) || eps.size + 1, ref: "dl|" + m[3], title: stripTags(m[4]) || tr("Episodio ", "Episode ") + m[2] });
+  }
+  log("dl episodes: " + eps.size);
+  if (!eps.size) throw kino.error("not_found", "no se encontró la lista de episodios", {
+    userMessage: tr("No se encontró la lista de capítulos de este título.", "No episode list found for this title."),
+  });
+  const list = Array.from(eps.values()).sort((a, b) => (a.season - b.season) || (a.number - b.number));
+  return { series: { title, poster }, episodes: list };
+}
+
+// Dooplay: cada opción pide /wp-json/dooplayer/v2/<post>/<tipo>/<nume> y recibe { embed_url }.
+async function dlResolve(url) {
+  const html = await getHtml(url);
+  const opts = [];
+  const re = /<li[^>]*class=['"][^'"]*dooplay_player_option[^'"]*['"][^>]*>([\s\S]*?)<\/li>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const tag = m[0];
+    const post = attr(tag, "data-post");
+    const type = attr(tag, "data-type") || "tv";
+    const nume = attr(tag, "data-nume");
+    if (!post || !nume) continue;
+    const t = /class=['"]title['"]>([\s\S]*?)<\/span>/i.exec(m[1]);
+    const name = t ? stripTags(t[1]) : "";
+    const latino = /flags\/mx\.png/i.test(m[1]) || /latino/i.test(name);
+    opts.push({ post, type, nume, name, latino });
+  }
+  log("dl resolve: opciones=" + opts.map((o) => (o.latino ? "lat" : "otro") + ":" + o.nume).join(","));
+  if (!opts.length) throw kino.error("unavailable", "sin opciones", {
+    userMessage: tr("Este capítulo no trae servidores disponibles.", "This episode has no servers available."),
+  });
+  opts.sort((a, b) => (b.latino ? 1 : 0) - (a.latino ? 1 : 0));
+  const label = (o) => (o.latino ? "Latino" : tr("Subtitulado", "Subbed")) + " · " + (o.name || o.nume);
+
+  const one = async (o) => {
+    const r = await kino.fetch(DL + "/wp-json/dooplayer/v2/" + o.post + "/" + o.type + "/" + encodeURIComponent(o.nume), { headers: { Referer: url } });
+    log("dl dooplayer " + o.nume + " status=" + r.status);
+    if (!r.ok) return null;
+    let j;
+    try { j = JSON.parse(await r.text()); } catch (e) { return null; }
+    let emb = j && (j.embed_url || j.url) ? String(j.embed_url || j.url) : "";
+    const fr = /src=["']([^"']+)["']/i.exec(emb);
+    if (fr) emb = fr[1];
+    emb = absUrl(emb);
+    if (!emb) return null;
+    log("dl embed: " + hostOf(emb) + pathShape(emb));
+    if (/\.(?:m3u8|mp4)(\?|$)/i.test(emb) && !isDemo(emb)) {
+      return { url: emb, mime: /\.m3u8/i.test(emb) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: DL + "/" }, label: label(o) };
+    }
+    const v = await embedFromHtml(emb, 0, url);
+    return v ? Object.assign(v, { label: label(o) }) : null;
+  };
+  const first = await firstSuccess(opts.slice(0, 3).map(one));
+  if (first) return first.v;
+  throw kino.error("unavailable", "ningún servidor entregó el video", {
+    userMessage: tr(
+      "Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.",
+      "No server for this episode could be opened from here. Try another episode or title."
+    ),
+  });
+}
+
 export async function episodes(ref) {
   await null;
   const raw = String(ref || "");
+  if (raw.startsWith("dl|")) return dlEpisodes(raw.slice(3));
   if (raw.startsWith("dy|")) return dyEpisodes(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
   const url = raw.slice(3);
@@ -658,6 +811,7 @@ export async function resolve(ref) {
   await null;
   const t0 = Date.now();
   const raw = String(ref || "");
+  if (raw.startsWith("dl|")) return dlResolve(raw.slice(3));
   if (raw.startsWith("dy|")) return dyResolve(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
   const url = raw.slice(3);
