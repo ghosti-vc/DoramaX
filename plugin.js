@@ -344,6 +344,8 @@ export async function search(query) {
     const html = await getHtml(u);
     const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
     const title = h1 ? stripTags(h1[1]).replace(/\s*[–-]\s*Doramas\s+Latino\s*$/i, "").trim() : "";
+    const tt = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+    log("directo: consulta=" + qa.slice(0, 40) + " url=" + u.slice(DL.length, DL.length + 70) + " <title>=" + (tt ? stripTags(tt[1]).slice(0, 70) : "ninguno") + " h1=" + (h1 ? "si" : "no") + " inicio=" + stripTags(html.slice(0, 600)).slice(0, 120));
     log("directo DoramasLat: titulo=" + (title ? "si" : "no") + " episodios=" + (/episodios|\/episodes\//i.test(html) ? "si" : "no") + " bytes=" + html.length);
     if (!title || !/episodios|\/episodes\//i.test(html)) return [];
     const img = /<div class=["']poster["'][^>]*>\s*<img[^>]*?(?:data-src|src)=["']([^"']+)["']/i.exec(html);
