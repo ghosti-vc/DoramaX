@@ -708,13 +708,13 @@ async function dfResolve(rest) {
   };
   // Primero solo los servidores en latino; si ninguno abre, se prueban los demás.
   const lat = all.filter((x) => x.latino).map((x) => x.u);
-  const rest = all.filter((x) => !x.latino).map((x) => x.u);
+  const otros = all.filter((x) => !x.latino).map((x) => x.u);
   if (lat.length) {
     const fl = await firstSuccess(lat.slice(0, 3).map(one));
     if (fl) return fl.v;
     log("df resolve: el latino no abrió, se prueba el otro idioma");
   }
-  const first = await firstSuccess((lat.length ? rest : links).slice(0, 4).map(one));
+  const first = await firstSuccess((lat.length ? otros : links).slice(0, 4).map(one));
   if (first) return first.v;
   throw kino.error("unavailable", "ningún servidor de DoramasFlix entregó el video", {
     userMessage: tr("Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.", "No server for this episode could be opened from here. Try another episode or title."),
