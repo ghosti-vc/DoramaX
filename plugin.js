@@ -663,6 +663,26 @@ function dfUnwrap(u) {
   } catch (e) { return u; }
 }
 
+// DoramasFlix guarda los idiomas como números (lang). Los nombres vienen en los datos de su página.
+let dfLangs = null;
+async function dfLangNames() {
+  if (dfLangs) return dfLangs;
+  const map = {};
+  try {
+    const r = await kino.fetch(DF + "/");
+    const html = r.ok ? String(await r.text()).replace(/\\"/g, '"') : "";
+    const i = html.indexOf('"langs":[');
+    if (i >= 0) {
+      let d = 0, j = i + 8, end = -1;
+      for (; j < html.length; j++) { const c = html.charAt(j); if (c === "[") d++; else if (c === "]") { d--; if (!d) { end = j; break; } } }
+      if (end > 0) for (const x of JSON.parse(html.slice(i + 8, end + 1))) if (x && x.code_flix != null) map[String(x.code_flix)] = String(x.name || "");
+    }
+  } catch (e) { log("df idiomas: no se pudieron leer"); }
+  log("df idiomas: " + JSON.stringify(map).slice(0, 160));
+  dfLangs = map;
+  return map;
+}
+
 async function dfResolve(rest) {
   const parts = rest.split("|");
   const isMovie = parts[0] === "m";
@@ -671,15 +691,21 @@ async function dfResolve(rest) {
   const d = await dfQuery("{" + field + "(id:" + JSON.stringify(id) + "){links_online{link server lang}}}");
   const raw = (d && d[field] && d[field].links_online) || [];
   const rank = (u) => { const h = hostOf(u); const i = DY_RANK.findIndex((n) => h.indexOf(n) >= 0); return i < 0 ? 99 : i; };
-  const links = raw.map((x) => dfUnwrap(String((x && x.link) || ""))).filter((u) => /^https?:\/\//i.test(u) && hostOf(u).indexOf("primeload") < 0);
-  links.sort((a, b) => rank(a) - rank(b));
-  log("df resolve: enlaces=" + links.map((u) => hostOf(u)).join(","));
+  const names = await dfLangNames();
+  const all = raw.map((x) => ({ u: dfUnwrap(String((x && x.link) || "")), lang: String((x && x.lang) == null ? "" : x.lang) }))
+    .filter((x) => /^https?:\/\//i.test(x.u) && hostOf(x.u).indexOf("primeload") < 0);
+  for (const x of all) { x.name = names[x.lang] || ""; x.latino = /lat/i.test(x.name); }
+  all.sort((a, b) => ((b.latino ? 1 : 0) - (a.latino ? 1 : 0)) || (rank(a.u) - rank(b.u)));
+  log("df resolve: enlaces=" + all.map((x) => hostOf(x.u) + ":lang" + x.lang + (x.name ? "(" + x.name + ")" : "")).join(","));
+  const links = all.map((x) => x.u);
+  const langOf = {};
+  for (const x of all) langOf[x.u] = x.name;
   const one = async (u) => {
     if (/\.(?:m3u8|mp4)(\?|$)/i.test(u) && !isDemo(u)) return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: DF + "/" }, label: "DoramasFlix" };
     const v = await embedFromHtml(u, 0, DF + "/");
-    return v ? Object.assign(v, { label: "DoramasFlix · " + hostOf(u) }) : null;
+    return v ? Object.assign(v, { label: (langOf[u] ? langOf[u] + " · " : "DoramasFlix · ") + hostOf(u) }) : null;
   };
-  const first = await firstSuccess(links.slice(0, 4).map(one));
+  const first = await firstSuccess(links.slice(0, 5).map(one));
   if (first) return first.v;
   throw kino.error("unavailable", "ningún servidor de DoramasFlix entregó el video", {
     userMessage: tr("Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.", "No server for this episode could be opened from here. Try another episode or title."),
