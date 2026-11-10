@@ -329,6 +329,11 @@ function absUrl(u) {
 
 const MEDIA_RE = /["'`]((?:https?:)?\/\/[^"'`\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"'`\s<>\\]*)?)["'`]/i;
 
+// Videos de prueba que traen los reproductores y sus librerías (Big Buck Bunny y compañía).
+// Nunca son el capítulo: se descartan para no mostrarlos por error.
+const DEMO_MEDIA = /big[_-]?buck[_-]?bunny|\bbbb[_-]|sintel|elephants?[_-]?dream|tears[_-]?of[_-]?steel|gtv-videos-bucket|commondatastorage|test-?streams|bitdash|bitmovin|mux\.dev|zencdn|oceans\.mp4|flowplayer\.com|jwplatform|\/samples?\/|(?:googleapis|gstatic|jsdelivr|cdnjs|unpkg)\./i;
+const isDemo = (u) => DEMO_MEDIA.test(String(u || ""));
+
 function normText(s) {
   return String(s || "").replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
 }
@@ -373,14 +378,28 @@ function base64Texts(html) {
 }
 
 function findMedia(text) {
-  const m = MEDIA_RE.exec(normText(text));
-  return m ? absUrl(m[1]) : "";
+  const re = new RegExp(MEDIA_RE.source, "gi");
+  const t = normText(text);
+  let m;
+  while ((m = re.exec(t))) {
+    const u = absUrl(m[1]);
+    if (u && !isDemo(u)) return u;
+    if (u) log("video de muestra descartado: " + hostOf(u) + pathShape(u));
+  }
+  return "";
 }
 
 // Igual, pero sin exigir comillas: el texto que sale de un base64 suele ser el enlace "pelado".
 function findMediaLoose(text) {
-  const m = /((?:https?:)?\/\/[^\s"'`<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'`<>\\]*)?)/i.exec(normText(text));
-  return m ? absUrl(m[1]) : "";
+  const re = /((?:https?:)?\/\/[^\s"'`<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'`<>\\]*)?)/gi;
+  const t = normText(text);
+  let m;
+  while ((m = re.exec(t))) {
+    const u = absUrl(m[1]);
+    if (u && !isDemo(u)) return u;
+    if (u) log("video de muestra descartado: " + hostOf(u) + pathShape(u));
+  }
+  return "";
 }
 
 // Busca el video escrito en la página, en sus scripts empaquetados o en sus textos base64.
@@ -476,10 +495,11 @@ async function embedFromHtml(embedUrl, depth, referer) {
   }
   diag(html, d, !!u);
   if (u) {
+    log("embed[" + d + "] video elegido: " + hostOf(u) + pathShape(u));
     return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: embedUrl } };
   }
   if (d >= 2) return null;
-  const links = embedLinks(html, embedUrl).slice(0, d === 0 ? 3 : 2);
+  const links = embedLinks(html, embedUrl).filter((l) => !/byse/i.test(hostOf(l))).slice(0, d === 0 ? 3 : 2);
   for (const l of links) {
     try {
       const got = await embedFromHtml(l, d + 1, embedUrl);
@@ -495,11 +515,25 @@ async function captureEmbed(embedUrl, ms) {
   if (typeof kino === "undefined" || !kino.browser || typeof kino.browser.capture !== "function") return null;
   const page = await kino.browser.capture(embedUrl, { timeoutMs: ms, headers: { Referer: TD + "/" } });
   const media = page && Array.isArray(page.media) ? page.media : [];
-  const first = media.find((x) => x && typeof x.url === "string" && /^https?:\/\//.test(x.url));
+  const first = media.find((x) => x && typeof x.url === "string" && /^https?:\/\//.test(x.url) && !isDemo(x.url));
   if (!first) return null;
   const out = { url: first.url, mime: first.mime || first.mimeType || (/\.m3u8(\?|$)/i.test(first.url) ? "application/x-mpegurl" : "video/mp4") };
   if (first.headers && typeof first.headers === "object") out.headers = first.headers;
   return out;
+}
+
+// Devuelve el primer resultado que llegue (no el último): { v, i } o null si ninguno entrega nada.
+function firstSuccess(tasks) {
+  return new Promise((resolveAll) => {
+    let pending = tasks.length;
+    if (!pending) { resolveAll(null); return; }
+    tasks.forEach((t, i) => {
+      Promise.resolve(t).then((v) => { if (v) resolveAll({ v, i }); }, () => {}).then(() => {
+        pending--;
+        if (pending === 0) resolveAll(null);
+      });
+    });
+  });
 }
 
 export async function resolve(ref) {
@@ -539,7 +573,34 @@ export async function resolve(ref) {
   list.sort((a, b) => ((a.lang === "es" ? 0 : 1) - (b.lang === "es" ? 0 : 1)) || (kindRank(a) - kindRank(b)));
   const label = (x) => (x.lang === "es" ? "Latino" : tr("Subtitulado", "Subbed")) + " · " + String(x.name || "").split(":")[0].trim();
 
+  const isPixel = (x) => /pixeldrain\.(?:com|net)\/(?:u|api\/file)\//i.test(absUrl(x.link || x.url));
+  const isDirect = (x) => x.type === "direct" || x.type === "video";
+  const embedAll = list.filter((x) => absUrl(x.link || x.url) && !isDirect(x) && !isPixel(x));
+  const hasLater = list.some((x) => isDirect(x) || isPixel(x));
+  const browserOk = typeof kino.sleep === "function" && kino.browser && typeof kino.browser.capture === "function";
+
+  // Navegador oculto: se prefiere una envoltura que NO apunte a reproductores que se quedan en "Loading..."
+  // (byse, hgcloud) ni a Abyss, porque con esos casi nunca ve el video.
+  const weak = (x) => {
+    const l = absUrl(x.link || x.url);
+    return /abyss/i.test(l) || /byse|hgcloud|abyss/i.test((innerHosts.get(l) || []).join(","));
+  };
+  const runCapture = async () => {
+    const left = 18000 - (Date.now() - t0);
+    const fe = embedAll.find((x) => !weak(x)) || embedAll[0];
+    if (!fe || left < 5000) return null;
+    try {
+      const sres = await captureEmbed(absUrl(fe.link || fe.url), Math.min(12000, left - 1500));
+      if (sres) { sres.label = label(fe); return sres; }
+      log("resolve: el navegador no vio video");
+    } catch (e) {
+      log("resolve: captura falló " + String((e && e.message) || e).slice(0, 60));
+    }
+    return null;
+  };
+
   let embedsDone = false;
+  let captureStarted = false;
   for (const x of list) {
     const link = absUrl(x.link || x.url);
     if (!link) continue;
@@ -550,43 +611,44 @@ export async function resolve(ref) {
       return { url: "https://pixeldrain.com/api/file/" + px[1], mime: "video/mp4", label: label(x) };
     }
 
-    if (x.type === "direct" || x.type === "video") {
+    if (isDirect(x)) {
       return { url: link, mime: /\.m3u8(\?|$)/i.test(link) ? "application/x-mpegurl" : "video/mp4", label: label(x), headers: { Referer: TD + "/" } };
     }
 
     if (embedsDone) continue;
-    // Reproductores embebidos: se leen varios a la vez (hasta 4) y gana el primero, en orden de lista,
-    // que entregue el video. Así no se espera uno por uno.
-    const embeds = list.filter((y) => {
-      const l = absUrl(y.link || y.url);
-      return l && y.type !== "direct" && y.type !== "video" && !/pixeldrain\.(?:com|net)\/(?:u|api\/file)\//i.test(l);
-    }).slice(0, 4);
-    const found = await Promise.allSettled(embeds.map((y) => embedFromHtml(absUrl(y.link || y.url), 0, TD + "/")));
-    for (let k = 0; k < embeds.length; k++) {
-      const r = found[k];
-      if (r.status === "fulfilled" && r.value) { r.value.label = label(embeds[k]); return r.value; }
-      if (r.status === "rejected") log("resolve: lectura falló " + String((r.reason && r.reason.message) || r.reason).slice(0, 60));
+    // Reproductores embebidos, por idioma (primero Latino): se leen hasta 4 a la vez y gana el PRIMERO
+    // que entregue el video, sin esperar a los demás. Si a los 4 s nadie ha entregado nada, el navegador
+    // oculto arranca en paralelo (solo si no hay un enlace directo más abajo en la lista).
+    const langs = [];
+    for (const y of embedAll) if (langs.indexOf(y.lang) < 0) langs.push(y.lang);
+    for (const lg of langs) {
+      const group = embedAll.filter((y) => y.lang === lg).slice(0, 4);
+      const staticP = firstSuccess(group.map((y) =>
+        embedFromHtml(absUrl(y.link || y.url), 0, TD + "/").then((v) => (v ? Object.assign(v, { label: label(y) }) : null))
+      ));
+      let winner = null;
+      if (browserOk && !hasLater && !captureStarted) {
+        const first = await Promise.race([staticP, kino.sleep(4000).then(() => "slow")]);
+        if (first && first !== "slow") {
+          winner = first.v;
+        } else if (first === "slow") {
+          captureStarted = true;
+          log("resolve: 4 s sin video, el navegador oculto arranca en paralelo");
+          const both = await firstSuccess([staticP.then((r) => (r ? r.v : null)), runCapture()]);
+          winner = both ? both.v : null;
+        }
+      } else {
+        const r = await staticP;
+        winner = r ? r.v : null;
+      }
+      if (winner) return winner;
     }
     embedsDone = true; // sigue la lista por si hay un Pixeldrain o directo más abajo
   }
-  // Último recurso: el navegador oculto con el primer embebido, con lo que quede de tiempo.
-  const left = 18000 - (Date.now() - t0);
-  const embedList = list.filter((x) => absUrl(x.link || x.url) && !/pixeldrain/i.test(x.link || x.url) && x.type !== "direct" && x.type !== "video");
-  // Se prefiere una envoltura que NO apunte a reproductores que se quedan en "Loading..." (byse, hgcloud)
-  // ni a Abyss, porque con esos el navegador oculto casi nunca ve el video.
-  const weak = (x) => {
-    const l = absUrl(x.link || x.url);
-    return /abyss/i.test(l) || /byse|hgcloud|abyss/i.test((innerHosts.get(l) || []).join(","));
-  };
-  const firstEmbed = embedList.find((x) => !weak(x)) || embedList[0];
-  if (firstEmbed && left > 5000) {
-    try {
-      const s = await captureEmbed(absUrl(firstEmbed.link || firstEmbed.url), Math.min(12000, left - 1500));
-      if (s) { s.label = label(firstEmbed); return s; }
-      log("resolve: el navegador no vio video");
-    } catch (e) {
-      log("resolve: captura falló " + String((e && e.message) || e).slice(0, 60));
-    }
+  // Último recurso: el navegador oculto (si no arrancó ya), con lo que quede de tiempo.
+  if (!captureStarted) {
+    const sres = await runCapture();
+    if (sres) return sres;
   }
   throw kino.error("unavailable", "ningún servidor entregó el video", {
     userMessage: tr(
