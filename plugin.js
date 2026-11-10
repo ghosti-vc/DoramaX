@@ -453,13 +453,27 @@ function diag(html, depth, found) {
 
 // Lee la página de un reproductor y busca el video; si no está, sigue los reproductores que esa
 // página abre (hasta 2 niveles), porque el de TuDorama suele ser solo una envoltura.
+const innerHosts = new Map(); // envoltura -> a qué reproductores apunta
+
 async function embedFromHtml(embedUrl, depth, referer) {
   const d = depth || 0;
   const r = await kino.fetch(embedUrl, { headers: { Referer: referer || TD + "/" } });
   log("embed[" + d + "] " + hostOf(embedUrl) + pathShape(embedUrl) + " status=" + r.status);
   if (!r.ok) return null;
-  const html = await r.text();
-  const u = deepMedia(html);
+  let html = await r.text();
+  let u = deepMedia(html);
+  if (d === 0) innerHosts.set(embedUrl, embedLinks(html, embedUrl).map(hostOf));
+  // Una página diminuta, sin video ni enlaces, suele ser una pantalla de comprobación del servidor:
+  // con la cookie que acaba de dejar, el segundo intento trae la página real. Un solo reintento.
+  if (!u && d >= 1 && html.length < 3000 && !/byse/i.test(hostOf(embedUrl)) && !embedLinks(html, embedUrl).length) {
+    log("embed[" + d + "] página diminuta (" + html.length + " bytes): reintento");
+    if (typeof kino.sleep === "function") await kino.sleep(900);
+    const r2 = await kino.fetch(embedUrl, { headers: { Referer: referer || TD + "/" } });
+    if (r2.ok) {
+      const h2 = await r2.text();
+      if (h2.length > html.length) { html = h2; u = deepMedia(html); }
+    }
+  }
   diag(html, d, !!u);
   if (u) {
     return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: embedUrl } };
@@ -557,7 +571,14 @@ export async function resolve(ref) {
   }
   // Último recurso: el navegador oculto con el primer embebido, con lo que quede de tiempo.
   const left = 18000 - (Date.now() - t0);
-  const firstEmbed = list.find((x) => absUrl(x.link || x.url) && !/pixeldrain/i.test(x.link || x.url) && x.type !== "direct" && x.type !== "video");
+  const embedList = list.filter((x) => absUrl(x.link || x.url) && !/pixeldrain/i.test(x.link || x.url) && x.type !== "direct" && x.type !== "video");
+  // Se prefiere una envoltura que NO apunte a reproductores que se quedan en "Loading..." (byse, hgcloud)
+  // ni a Abyss, porque con esos el navegador oculto casi nunca ve el video.
+  const weak = (x) => {
+    const l = absUrl(x.link || x.url);
+    return /abyss/i.test(l) || /byse|hgcloud|abyss/i.test((innerHosts.get(l) || []).join(","));
+  };
+  const firstEmbed = embedList.find((x) => !weak(x)) || embedList[0];
   if (firstEmbed && left > 5000) {
     try {
       const s = await captureEmbed(absUrl(firstEmbed.link || firstEmbed.url), Math.min(12000, left - 1500));
