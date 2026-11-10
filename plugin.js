@@ -1,7 +1,8 @@
-// DoramaX - catálogo de K-dramas en español (TuDorama).
+// DoramaX - catálogo de K-dramas en español (TuDorama y DoramasYT).
 // Reproduce desde los servidores del sitio (directos o con el navegador oculto).
 
 const TD = "https://tudorama.com";
+const DY = "https://www.doramasyt.com";
 const HOME_ROW = 20;
 const MAX_RESULTS = 100;
 
@@ -96,13 +97,55 @@ const SECTIONS = {
   latino: { path: "/genero/espanol-latino/", genre: "series" },
   kdramas: { path: "/genero/series/", genre: "series" },
   peliculas: { path: "/genero/peliculas/", genre: "peliculas" },
+  // DoramasYT (site "dy"): el Latino se saca de la búsqueda "latino" (sus series en latino lo llevan en el nombre).
+  dylatino: { site: "dy", path: "/buscar?q=latino", genre: "series" },
+  dyemision: { site: "dy", path: "/emision", genre: "series" },
 };
 const CAT_VIEW = 60;  // títulos por tanda de "Ver más"
 const CAT_MAX = 100;  // tope de Kino por página
 
+// ---- DoramasYT: tarjetas ---------------------------------------------------------------------
+
+// Cada ficha: <a href=".../dorama/<slug>"> ... <img data-src="..."> ... <h3 class="title_cap">Título</h3></a>
+function dyCards(html) {
+  const byUrl = new Map();
+  const re = /<a[^>]+href=["'](https:\/\/www\.doramasyt\.com\/(dorama|pelicula)\/([a-z0-9-]+))["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const e = byUrl.get(m[1]) || { kind: m[2], slug: m[3], title: "", alt: "", poster: undefined };
+    const h3 = /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(m[4]);
+    const text = h3 ? stripTags(h3[1]) : "";
+    if (text && !e.title) e.title = text;
+    const img = /<img[^>]*>/i.exec(m[4]);
+    if (img) {
+      const ds = /data-src=["']([^"']+)["']/i.exec(img[0]);
+      const sr = /\ssrc=["']([^"']+)["']/i.exec(img[0]);
+      if (!e.poster) e.poster = ds ? ds[1] : (sr && !/\/img\//.test(sr[1]) ? sr[1] : undefined);
+      const alt = /alt=["']([^"']+)["']/i.exec(img[0]);
+      if (alt && !e.alt) e.alt = decodeEntities(alt[1]).replace(/^Ver\s+/i, "").replace(/\s+online.*$/i, "");
+    }
+    byUrl.set(m[1], e);
+  }
+  const items = [];
+  for (const [url, e] of byUrl) {
+    const title = e.title || e.alt;
+    if (!title) continue;
+    items.push({
+      id: "dy-" + e.slug.slice(0, 80),
+      ref: "dy|" + url,
+      title: title.slice(0, 200),
+      kind: e.kind === "pelicula" ? "movie" : "series",
+      genres: e.kind === "pelicula" ? ["peliculas", "drama"] : ["series", "drama"],
+      poster: e.poster,
+    });
+  }
+  return items;
+}
+
 async function listPage(path) {
-  const html = await getHtml(TD + path);
-  return cards(html);
+  const dy = path.startsWith("dy:");
+  const html = await getHtml((dy ? DY : TD) + (dy ? path.slice(3) : path));
+  return dy ? dyCards(html) : cards(html);
 }
 
 export async function home() {
@@ -112,6 +155,8 @@ export async function home() {
     { id: "td-emision", ref: "emision", title: tr("En emisión", "Airing"), path: "/genero/emision/", genre: "series" },
     { id: "td-kdramas", ref: "kdramas", title: tr("K-Dramas", "K-Dramas"), path: "/genero/series/", genre: "series" },
     { id: "td-peliculas", ref: "peliculas", title: tr("Películas", "Movies"), path: "/genero/peliculas/", genre: "peliculas" },
+    { id: "dy-latino", ref: "dylatino", title: tr("DoramasYT · Latino", "DoramasYT · Latin Spanish"), path: "dy:/buscar?q=latino", genre: "series" },
+    { id: "dy-emision", ref: "dyemision", title: tr("DoramasYT · En emisión", "DoramasYT · Airing"), path: "dy:/emision", genre: "series" },
   ];
   const res = await Promise.allSettled(defs.map((d) => listPage(d.path)));
   const rows = [];
@@ -128,6 +173,11 @@ export async function home() {
 // Una página de una sección: /genero/<x>/ (+ page/N/).
 async function sectionPage(ref, n) {
   const sec = SECTIONS[ref];
+  if (sec.site === "dy") {
+    const sep = sec.path.indexOf("?") >= 0 ? "&" : "?";
+    const html = await getHtml(DY + sec.path + (n > 1 ? sep + "page=" + n : ""));
+    return { items: dyCards(html), hasNext: html.indexOf("page=" + (n + 1)) !== -1 };
+  }
   const html = await getHtml(TD + sec.path + (n > 1 ? "page/" + n + "/" : ""));
   return { items: cards(html), hasNext: html.indexOf("/page/" + (n + 1) + "/") !== -1 };
 }
@@ -178,6 +228,8 @@ export async function categories() {
     { id: "emision", title: tr("En emisión", "Airing") },
     { id: "kdramas", title: tr("K-Dramas", "K-Dramas") },
     { id: "peliculas", title: tr("Películas", "Movies") },
+    { id: "dylatino", title: tr("DoramasYT · Latino", "DoramasYT · Latin Spanish") },
+    { id: "dyemision", title: tr("DoramasYT · En emisión", "DoramasYT · Airing") },
   ];
   const first = await Promise.allSettled(defs.map((d) => sectionPage(d.id, 1)));
   return defs.map((d, i) => {
@@ -191,8 +243,19 @@ export async function search(query) {
   await null;
   const q = stripTags(query && query.q).slice(0, 100);
   if (!q) return [];
-  const html = await getHtml(TD + "/?s=" + encodeURIComponent(q));
-  return cards(html).slice(0, MAX_RESULTS);
+  const enc = encodeURIComponent(q);
+  const [a, b] = await Promise.allSettled([
+    getHtml(TD + "/?s=" + enc).then(cards),
+    getHtml(DY + "/buscar?q=" + enc).then(dyCards),
+  ]);
+  if (a.status === "rejected" && b.status === "rejected") throw a.reason;
+  const out = [];
+  const seen = new Set();
+  for (const r of [a, b]) {
+    if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
+    for (const x of r.value) if (!seen.has(x.id)) { seen.add(x.id); out.push(x); }
+  }
+  return out.slice(0, MAX_RESULTS);
 }
 
 // ---- Peticiones al servidor de WordPress (admin-ajax) -----------------------------------------
@@ -235,9 +298,64 @@ function attr(tag, name) {
 
 // ---- Episodios --------------------------------------------------------------------------------
 
+// ---- DoramasYT: episodios y reproducción ------------------------------------------------------
+
+async function dyEpisodes(url) {
+  const html = await getHtml(url);
+  const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html);
+  const og = /property=["']og:image["'][^>]*content=["']([^"']+)["']/i.exec(html);
+  const title = h1 ? stripTags(h1[1]).replace(/^Ver\s+/i, "").replace(/\s+(online|en español).*$/i, "") : url;
+  const eps = new Map();
+  const re = /href=["'](https:\/\/www\.doramasyt\.com\/ver\/[a-z0-9-]+-episodio-(\d+))["']/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    if (eps.has(m[1])) continue;
+    eps.set(m[1], { season: 1, number: Number(m[2]), ref: "dy|" + m[1], title: tr("Episodio ", "Episode ") + m[2] });
+  }
+  log("dy episodes: " + eps.size);
+  if (!eps.size) throw kino.error("not_found", "no se encontró la lista de episodios", {
+    userMessage: tr("No se encontró la lista de capítulos de este título.", "No episode list found for this title."),
+  });
+  const list = Array.from(eps.values()).sort((a, b) => a.number - b.number);
+  return { series: { title, poster: og ? og[1] : undefined }, episodes: list };
+}
+
+// Orden de preferencia de los servidores de DoramasYT (los que más a menudo entregan el video).
+const DY_RANK = ["voe", "streamtape", "mp4upload", "lulu", "savefiles", "mxdrop", "doodstream", "filemoon", "mega"];
+
+async function dyResolve(url) {
+  const html = await getHtml(url);
+  const btns = [];
+  const re = /<button[^>]*data-player=["']([^"']+)["'][^>]*>([\s\S]*?)<\/button>/gi;
+  let m;
+  while ((m = re.exec(html))) btns.push({ token: m[1], name: stripTags(m[2]).toLowerCase() });
+  log("dy resolve: servidores=" + btns.map((b) => b.name).join(","));
+  if (!btns.length) throw kino.error("unavailable", "sin servidores", {
+    userMessage: tr("Este capítulo no trae servidores disponibles.", "This episode has no servers available."),
+  });
+  const rank = (b) => { const i = DY_RANK.indexOf(b.name); return i < 0 ? 50 : i; };
+  const cands = btns.filter((b) => b.name !== "mega").sort((a, b) => rank(a) - rank(b)).slice(0, 4);
+  const lat = /-latino-/i.test(url);
+  const label = (b) => (lat ? "Latino" : tr("Subtitulado", "Subbed")) + " · " + b.name;
+  // El reproductor de la página es un iframe a /reproductor?video=<código>&player=<nombre>.
+  const tasks = cands.map((b) => {
+    const pu = DY + "/reproductor?video=" + b.token + "&player=" + encodeURIComponent(b.name) + "&token=";
+    return embedFromHtml(pu, 0, url).then((v) => (v ? Object.assign(v, { label: label(b) }) : null));
+  });
+  const first = await firstSuccess(tasks);
+  if (first) return first.v;
+  throw kino.error("unavailable", "ningún servidor entregó el video", {
+    userMessage: tr(
+      "Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.",
+      "No server for this episode could be opened from here. Try another episode or title."
+    ),
+  });
+}
+
 export async function episodes(ref) {
   await null;
   const raw = String(ref || "");
+  if (raw.startsWith("dy|")) return dyEpisodes(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
   const url = raw.slice(3);
   const html = await getHtml(url);
@@ -540,6 +658,7 @@ export async function resolve(ref) {
   await null;
   const t0 = Date.now();
   const raw = String(ref || "");
+  if (raw.startsWith("dy|")) return dyResolve(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
   const url = raw.slice(3);
   const html = await getHtml(url);
