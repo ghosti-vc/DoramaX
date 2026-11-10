@@ -245,7 +245,7 @@ function normTitle(t) {
 
 // Junta los títulos repetidos (mismo nombre, aunque vengan de fuentes distintas) en UNA sola tarjeta.
 // La tarjeta conserva todas las direcciones ("mx|a||b"); al abrirla, episodes() elige la que tenga más capítulos.
-const SRC_PRIO = { td: 0, dl: 1, dy: 2, df: 3 };
+const SRC_PRIO = { df: -1, td: 0, dl: 1, dy: 2 };
 function mergeDupes(items) {
   const groups = new Map();
   const order = [];
@@ -375,6 +375,7 @@ export async function search(query) {
     return [];
   };
   const dfSearch = async () => {
+    dfProbe();
     const d = await dfQuery("query S($input:String,$limit:Int){searchDorama(input:$input,limit:$limit){_id slug name name_es poster_path poster} searchMovie(input:$input,limit:$limit){_id slug name name_es poster_path poster}}", { input: qa, limit: 20 });
     return ((d && d.searchDorama) || []).map((x) => dfItem(x, "d")).concat(((d && d.searchMovie) || []).map((x) => dfItem(x, "m"))).filter(Boolean);
   };
@@ -386,7 +387,7 @@ export async function search(query) {
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected" && f.status === "rejected") throw a.reason;
   const all = [];
-  for (const r of [a, b, c, f]) {
+  for (const r of [f, a, b, c]) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
     for (const x of r.value) all.push(x);
   }
@@ -620,8 +621,21 @@ function humanSlug(slug) {
   return String(slug || "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-async function dfEpisodes(rest) {
-  const parts = rest.split("|");
+// Solo para el registro: pregunta a DoramasFlix qué datos tiene cada serie (por si marca cuáles son en latino).
+let dfProbed = false;
+async function dfProbe() {
+  if (dfProbed) return;
+  dfProbed = true;
+  try {
+    const d = await dfQuery('{a:__type(name:"Dorama"){fields{name}} b:__type(name:"Episode"){fields{name}} c:__schema{queryType{fields{name}}}}');
+    const names = (t) => ((t && t.fields) || []).map((f) => f.name).join(",");
+    const txt = "Dorama=" + names(d.a) + " | Episode=" + names(d.b) + " | Query=" + (((d.c && d.c.queryType && d.c.queryType.fields) || []).map((f) => f.name).join(","));
+    for (let i = 0; i < txt.length && i < 1800; i += 150) log("df esquema: " + txt.slice(i, i + 150));
+  } catch (e) { log("df esquema: no disponible"); }
+}
+
+async function dfEpisodes(spec) {
+  const parts = spec.split("|");
   const kind = parts[0], slug = parts[1], id = parts[2];
   const title = humanSlug(slug);
   if (kind === "m") return { series: { title }, episodes: [{ season: 1, number: 1, ref: "df|m|" + slug + "|" + id, title }] };
@@ -683,8 +697,8 @@ async function dfLangNames() {
   return map;
 }
 
-async function dfResolve(rest) {
-  const parts = rest.split("|");
+async function dfResolve(spec) {
+  const parts = spec.split("|");
   const isMovie = parts[0] === "m";
   const id = isMovie ? parts[2] : parts[1];
   const field = isMovie ? "getMovieLinks" : "getEpisodeLinks";
@@ -746,6 +760,7 @@ export async function episodes(ref) {
     const eps = best.episodes.map((e) => {
       const alts = [e.ref];
       byKey.forEach((m, i) => { if (i !== bestI) { const o = m.get(e.season + "x" + e.number); if (o && alts.indexOf(o) < 0) alts.push(o); } });
+      alts.sort((x, y) => (SRC_PRIO[x.slice(0, 2)] || 0) - (SRC_PRIO[y.slice(0, 2)] || 0));
       return alts.length > 1 ? Object.assign({}, e, { ref: "mx|" + alts.join("||") }) : e;
     });
     return Object.assign({}, best, { episodes: eps });
