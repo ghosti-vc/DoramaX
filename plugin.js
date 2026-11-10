@@ -621,17 +621,27 @@ function humanSlug(slug) {
   return String(slug || "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-// Solo para el registro: pregunta a DoramasFlix qué datos tiene cada serie (por si marca cuáles son en latino).
+// Solo para el registro: prueba qué datos tiene cada serie en DoramasFlix (por si marca cuáles son en latino).
 let dfProbed = false;
 async function dfProbe() {
   if (dfProbed) return;
   dfProbed = true;
-  try {
-    const d = await dfQuery('{a:__type(name:"Dorama"){fields{name}} b:__type(name:"Episode"){fields{name}} c:__schema{queryType{fields{name}}}}');
-    const names = (t) => ((t && t.fields) || []).map((f) => f.name).join(",");
-    const txt = "Dorama=" + names(d.a) + " | Episode=" + names(d.b) + " | Query=" + (((d.c && d.c.queryType && d.c.queryType.fields) || []).map((f) => f.name).join(","));
-    for (let i = 0; i < txt.length && i < 1800; i += 150) log("df esquema: " + txt.slice(i, i + 150));
-  } catch (e) { log("df esquema: no disponible"); }
+  const queries = [
+    '{__type(name:"Dorama"){fields{name}}}',
+    '{paginationDorama(page:1,limit:1){items{_id languages lang langs audio language idioma latino spanish is_latino dubbed genres countries status}}}',
+  ];
+  for (const q of queries) {
+    try {
+      const r = await kino.fetch(DF_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", Origin: DF, Referer: DF + "/", "x-brand-host": "doramasflix.io", "x-forwarded-host": "doramasflix.io" },
+        body: JSON.stringify({ query: q }),
+      });
+      const t = String(await r.text());
+      log("df sonda " + r.status + ": " + t.length + " bytes");
+      for (let k = 0; k < t.length && k < 1500; k += 150) log("df sonda: " + t.slice(k, k + 150));
+    } catch (e) { log("df sonda: falló"); }
+  }
 }
 
 async function dfEpisodes(spec) {
