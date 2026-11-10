@@ -3,21 +3,16 @@
   "name": "DoramaX",
   "description": "K-dramas en español latino, en emisión, K-Dramas, películas.",
   "author": "Ghosti-vc",
-  "version": "1.2.32",
+  "version": "1.3.0",
   "apiVersion": 9,
   "entry": "plugin.js",
-  "icon": "",
-  "capabilities": [
-    "home",
-    "browse",
-    "search",
-    "episodes",
-    "resolve"
-  ],
+  "capabilities": ["home", "browse", "search", "episodes", "resolve"],
   "hosts": [
     "tudorama.com",
     "www.tudorama.com",
     "cdn.tudorama.com",
+    "www.doramasyt.com",
+    "doramasyt.com",
     "image.tmdb.org",
     "pixeldrain.com"
   ],
