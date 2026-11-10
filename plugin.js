@@ -344,7 +344,8 @@ export async function search(query) {
     const html = await getHtml(u);
     const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
     const title = h1 ? stripTags(h1[1]).replace(/\s*[–-]\s*Doramas\s+Latino\s*$/i, "").trim() : "";
-    if (!title || !/class=['"]episodios['"]/i.test(html)) return [];
+    log("directo DoramasLat: titulo=" + (title ? "si" : "no") + " episodios=" + (/episodios|\/episodes\//i.test(html) ? "si" : "no") + " bytes=" + html.length);
+    if (!title || !/episodios|\/episodes\//i.test(html)) return [];
     const img = /<div class=["']poster["'][^>]*>\s*<img[^>]*?(?:data-src|src)=["']([^"']+)["']/i.exec(html);
     return [{ id: "dl-" + slug + "-doramas-latino", ref: "dl|" + u, title: title.slice(0, 200), kind: "series", genres: ["series", "drama"], poster: img ? img[1] : undefined }];
   };
@@ -372,6 +373,7 @@ export async function search(query) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
     for (const x of r.value) all.push(x);
   }
+  log("búsqueda: " + all.length + " resultados");
   return mergeDupes(all).slice(0, MAX_RESULTS);
 }
 
