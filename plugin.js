@@ -233,6 +233,31 @@ function normTitle(t) {
     .replace(/\blatino\b/g, "").replace(/[^a-z0-9]+/g, "");
 }
 
+// Junta los títulos repetidos (mismo nombre, aunque vengan de fuentes distintas) en UNA sola tarjeta.
+// La tarjeta conserva todas las direcciones ("mx|a||b"); al abrirla, episodes() elige la que tenga más capítulos.
+const SRC_PRIO = { td: 0, dl: 1, dy: 2 };
+function mergeDupes(items) {
+  const groups = new Map();
+  const order = [];
+  for (const x of items) {
+    const k = normTitle(x.title) || x.id;
+    let g = groups.get(k);
+    if (!g) { g = []; groups.set(k, g); order.push(k); }
+    g.push(x);
+  }
+  return order.map((k) => {
+    const g = groups.get(k);
+    if (g.length === 1) return g[0];
+    g.sort((a, b) => (SRC_PRIO[a.ref.slice(0, 2)] || 0) - (SRC_PRIO[b.ref.slice(0, 2)] || 0));
+    const first = Object.assign({}, g[0]);
+    if (!first.poster) { const p = g.find((y) => y.poster); if (p) first.poster = p.poster; }
+    const refs = [];
+    for (const y of g) if (refs.indexOf(y.ref) < 0) refs.push(y.ref);
+    if (refs.length > 1) first.ref = "mx|" + refs.join("||");
+    return first;
+  });
+}
+
 // Una página de una sección: pide todas sus fuentes a la vez, intercala sus títulos (uno de cada una,
 // por turnos) y quita los repetidos. Si una fuente falla o ya no tiene esa página, se sigue con las demás.
 async function sectionPage(ref, n) {
@@ -241,19 +266,12 @@ async function sectionPage(ref, n) {
   const ok = res.filter((r) => r.status === "fulfilled");
   if (!ok.length) throw res[0].reason;
   const lists = ok.map((r) => r.value.items);
-  const items = [];
-  const seen = new Set();
+  const mixed = [];
   const longest = Math.max.apply(null, lists.map((l) => l.length));
   for (let i = 0; i < longest; i++) {
-    for (const l of lists) {
-      const x = l[i];
-      if (!x) continue;
-      const k = normTitle(x.title) || x.id;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      items.push(x);
-    }
+    for (const l of lists) if (l[i]) mixed.push(l[i]);
   }
+  const items = mergeDupes(mixed);
   return { items, hasNext: ok.some((r) => r.value.hasNext) };
 }
 
@@ -316,20 +334,45 @@ export async function search(query) {
   await null;
   const q = stripTags(query && query.q).slice(0, 100);
   if (!q) return [];
-  const enc = encodeURIComponent(q);
+  const qa = q.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[¡!¿?:,.]/g, " ").replace(/\s+/g, " ").trim() || q;
+  const enc = encodeURIComponent(qa);
+  const slug = qa.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  // Si el buscador de DoramasLat no la encuentra, se prueba la dirección directa de la serie.
+  const dlDirect = async () => {
+    if (!slug) return [];
+    const u = DL + "/tvshows/" + slug + "-doramas-latino/";
+    const html = await getHtml(u);
+    const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
+    const title = h1 ? stripTags(h1[1]).replace(/\s*[–-]\s*Doramas\s+Latino\s*$/i, "").trim() : "";
+    if (!title || !/class=['"]episodios['"]/i.test(html)) return [];
+    const img = /<div class=["']poster["'][^>]*>\s*<img[^>]*?(?:data-src|src)=["']([^"']+)["']/i.exec(html);
+    return [{ id: "dl-" + slug + "-doramas-latino", ref: "dl|" + u, title: title.slice(0, 200), kind: "series", genres: ["series", "drama"], poster: img ? img[1] : undefined }];
+  };
+  const tdDirect = async () => {
+    if (!slug) return [];
+    for (const kind of ["serie", "pelicula"]) {
+      let html;
+      try { html = await getHtml(TD + "/" + kind + "/" + slug + "/"); } catch (e) { continue; }
+      const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
+      const title = h1 ? stripTags(h1[1]).trim() : "";
+      if (!title || !/\/ver\//i.test(html)) continue;
+      const og = /property=["']og:image["'][^>]*content=["']([^"']+)["']/i.exec(html);
+      return [{ id: "td-" + slug, ref: "td|" + TD + "/" + kind + "/" + slug + "/", title: title.slice(0, 200), kind: kind === "serie" ? "series" : "movie", genres: kind === "serie" ? ["series", "drama"] : ["peliculas", "drama"], poster: og ? og[1] : undefined }];
+    }
+    return [];
+  };
   const [a, b, c] = await Promise.allSettled([
-    getHtml(TD + "/?s=" + enc).then(cards),
+    getHtml(TD + "/?s=" + enc).then(cards).then((r) => (r.length ? r : tdDirect().catch(() => []))),
     getHtml(DY + "/buscar?q=" + enc).then(dyCards),
-    getHtml(DL + "/?s=" + enc).then(dlCards),
+    getHtml(DL + "/?s=" + enc).then(dlCards).then((r) => (r.length ? r : dlDirect().catch(() => []))),
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected") throw a.reason;
-  const out = [];
-  const seen = new Set();
+  const all = [];
   for (const r of [a, b, c]) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
-    for (const x of r.value) if (!seen.has(x.id)) { seen.add(x.id); out.push(x); }
+    for (const x of r.value) all.push(x);
   }
-  return out.slice(0, MAX_RESULTS);
+  return mergeDupes(all).slice(0, MAX_RESULTS);
 }
 
 // ---- Peticiones al servidor de WordPress (admin-ajax) -----------------------------------------
@@ -507,6 +550,32 @@ async function dlResolve(url) {
 export async function episodes(ref) {
   await null;
   const raw = String(ref || "");
+  // Tarjeta combinada: se piden las listas de todas las fuentes a la vez y gana la que tenga más capítulos.
+  if (raw.startsWith("mx|")) {
+    const refs = raw.slice(3).split("||").filter(Boolean).slice(0, 4);
+    const res = await Promise.allSettled(refs.map((r) => episodes(r)));
+    let best = null;
+    let bestI = -1;
+    res.forEach((r, i) => {
+      if (r.status !== "fulfilled" || !r.value || !r.value.episodes) { log("episodes: falló " + refs[i].slice(0, 2)); return; }
+      log("episodes: " + refs[i].slice(0, 2) + "=" + r.value.episodes.length);
+      if (!best || r.value.episodes.length > best.episodes.length) { best = r.value; bestI = i; }
+    });
+    if (!best) throw res[0].reason || kino.error("not_found", "sin lista de episodios");
+    // Cada capítulo recuerda los mismos capítulos (misma temporada y número) de las otras fuentes,
+    // para poder pasar a otra si la primera no entrega el video.
+    const byKey = res.map((r) => {
+      const m = new Map();
+      if (r.status === "fulfilled" && r.value && r.value.episodes) for (const e of r.value.episodes) m.set(e.season + "x" + e.number, e.ref);
+      return m;
+    });
+    const eps = best.episodes.map((e) => {
+      const alts = [e.ref];
+      byKey.forEach((m, i) => { if (i !== bestI) { const o = m.get(e.season + "x" + e.number); if (o && alts.indexOf(o) < 0) alts.push(o); } });
+      return alts.length > 1 ? Object.assign({}, e, { ref: "mx|" + alts.join("||") }) : e;
+    });
+    return Object.assign({}, best, { episodes: eps });
+  }
   if (raw.startsWith("dl|")) return dlEpisodes(raw.slice(3));
   if (raw.startsWith("dy|")) return dyEpisodes(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
@@ -807,10 +876,33 @@ function firstSuccess(tasks) {
   });
 }
 
+// Capítulo con varias fuentes: se prueba la primera y, si falla o tarda, se pasa a la siguiente.
+async function resolveAny(refs) {
+  const t0 = Date.now();
+  let lastErr = null;
+  const canRace = typeof kino.sleep === "function";
+  for (let i = 0; i < refs.length; i++) {
+    const left = 19000 - (Date.now() - t0);
+    if (left < 3500) break;
+    const cap = i === refs.length - 1 ? left : Math.min(left, 9000);
+    log("resolve: fuente " + (i + 1) + "/" + refs.length + " (" + refs[i].slice(0, 2) + ")");
+    const attempt = resolve(refs[i]).catch((e) => { lastErr = e; log("resolve: " + refs[i].slice(0, 2) + " falló"); return null; });
+    const got = canRace ? await Promise.race([attempt, kino.sleep(cap).then(() => null)]) : await attempt;
+    if (got) return got;
+  }
+  throw lastErr || kino.error("unavailable", "ninguna fuente entregó el video", {
+    userMessage: tr(
+      "Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.",
+      "No server for this episode could be opened from here. Try another episode or title."
+    ),
+  });
+}
+
 export async function resolve(ref) {
   await null;
   const t0 = Date.now();
   const raw = String(ref || "");
+  if (raw.startsWith("mx|")) return resolveAny(raw.slice(3).split("||").filter(Boolean).slice(0, 3));
   if (raw.startsWith("dl|")) return dlResolve(raw.slice(3));
   if (raw.startsWith("dy|")) return dyResolve(raw.slice(3));
   if (!raw.startsWith("td|")) throw kino.error("not_found", "referencia desconocida");
