@@ -694,7 +694,8 @@ async function dfResolve(rest) {
   const names = await dfLangNames();
   const all = raw.map((x) => ({ u: dfUnwrap(String((x && x.link) || "")), lang: String((x && x.lang) == null ? "" : x.lang) }))
     .filter((x) => /^https?:\/\//i.test(x.u) && hostOf(x.u).indexOf("primeload") < 0);
-  for (const x of all) { x.name = names[x.lang] || ""; x.latino = /lat/i.test(x.name); }
+  // Por lo visto en los registros: el idioma 38 es el latino y el 13109 el subtitulado.
+  for (const x of all) { x.name = names[x.lang] || (x.lang === "38" ? "Latino" : x.lang === "13109" ? tr("Subtitulado", "Subbed") : ""); x.latino = /lat/i.test(x.name); }
   all.sort((a, b) => ((b.latino ? 1 : 0) - (a.latino ? 1 : 0)) || (rank(a.u) - rank(b.u)));
   log("df resolve: enlaces=" + all.map((x) => hostOf(x.u) + ":lang" + x.lang + (x.name ? "(" + x.name + ")" : "")).join(","));
   const links = all.map((x) => x.u);
@@ -705,7 +706,15 @@ async function dfResolve(rest) {
     const v = await embedFromHtml(u, 0, DF + "/");
     return v ? Object.assign(v, { label: (langOf[u] ? langOf[u] + " · " : "DoramasFlix · ") + hostOf(u) }) : null;
   };
-  const first = await firstSuccess(links.slice(0, 5).map(one));
+  // Primero solo los servidores en latino; si ninguno abre, se prueban los demás.
+  const lat = all.filter((x) => x.latino).map((x) => x.u);
+  const rest = all.filter((x) => !x.latino).map((x) => x.u);
+  if (lat.length) {
+    const fl = await firstSuccess(lat.slice(0, 3).map(one));
+    if (fl) return fl.v;
+    log("df resolve: el latino no abrió, se prueba el otro idioma");
+  }
+  const first = await firstSuccess((lat.length ? rest : links).slice(0, 4).map(one));
   if (first) return first.v;
   throw kino.error("unavailable", "ningún servidor de DoramasFlix entregó el video", {
     userMessage: tr("Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.", "No server for this episode could be opened from here. Try another episode or title."),
