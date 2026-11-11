@@ -102,6 +102,7 @@ const SECTIONS = {
     { site: "td", path: "/genero/espanol-latino/" },
     { site: "dy", path: "/buscar?q=latino" },   // sus series en latino llevan "latino" en el nombre
     { site: "dl", path: "/tvshows/" },            // todo DoramasLat es en latino
+    { site: "df", kind: "d", latOnly: true },     // DoramasFlix: solo las que traen idioma latino
   ] },
   emision: { genre: "series", parts: [
     { site: "td", path: "/genero/emision/" },
@@ -220,9 +221,11 @@ export async function home() {
 async function partPage(part, n) {
   if (part.site === "df") {
     const field = part.kind === "m" ? "paginationMovie" : "paginationDorama";
-    const d = await dfQuery("query C($page:Int,$limit:Int){" + field + "(page:$page,limit:$limit){pageInfo{hasNextPage} items{_id slug name name_es poster_path poster}}}", { page: n, limit: 24 });
+    const d = await dfQueryL((L) => "query C($page:Int,$limit:Int){" + field + "(page:$page,limit:$limit){pageInfo{hasNextPage} items{_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "}}}", { page: n, limit: part.latOnly ? 48 : 24 });
     const o = (d && d[field]) || {};
-    return { items: (o.items || []).map((x) => dfItem(x, part.kind)).filter(Boolean), hasNext: !!(o.pageInfo && o.pageInfo.hasNextPage) };
+    let items = (o.items || []).map((x) => dfItem(x, part.kind)).filter(Boolean);
+    if (part.latOnly) items = items.filter((x) => /\|[0-9]+(,[0-9]+)*$/.test(x.ref));
+    return { items, hasNext: !!(o.pageInfo && o.pageInfo.hasNextPage) };
   }
   if (part.site === "dy") {
     const sep = part.path.indexOf("?") >= 0 ? "&" : "?";
@@ -375,8 +378,7 @@ export async function search(query) {
     return [];
   };
   const dfSearch = async () => {
-    dfProbe();
-    const d = await dfQuery("query S($input:String,$limit:Int){searchDorama(input:$input,limit:$limit){_id slug name name_es poster_path poster} searchMovie(input:$input,limit:$limit){_id slug name name_es poster_path poster}}", { input: qa, limit: 20 });
+    const d = await dfQueryL((L) => "query S($input:String,$limit:Int){searchDorama(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "} searchMovie(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "}}", { input: qa, limit: 20 });
     return ((d && d.searchDorama) || []).map((x) => dfItem(x, "d")).concat(((d && d.searchMovie) || []).map((x) => dfItem(x, "m"))).filter(Boolean);
   };
   const [a, b, c, f] = await Promise.allSettled([
@@ -569,6 +571,15 @@ async function dlResolve(url) {
 
 // ---- DoramasFlix: usa su API pública (GraphQL) ------------------------------------------------
 
+let dfNoLangs = false;
+// Pide también los idiomas de cada título; si el sitio no los acepta, repite la consulta sin ellos.
+async function dfQueryL(make, variables) {
+  if (!dfNoLangs) {
+    try { return await dfQuery(make(true), variables); } catch (e) { dfNoLangs = true; log("df: sin idiomas en la lista"); }
+  }
+  return dfQuery(make(false), variables);
+}
+
 async function dfQuery(query, variables) {
   let r;
   try {
@@ -609,7 +620,7 @@ function dfItem(x, kind) {
   if (!title) return null;
   return {
     id: "df-" + String(x.slug).slice(0, 80),
-    ref: "df|" + kind + "|" + x.slug + "|" + x._id,
+    ref: "df|" + kind + "|" + x.slug + "|" + x._id + (Array.isArray(x.langs) ? "|" + x.langs.filter((l) => l && /lat/i.test(String(l.name || ""))).map((l) => String(l.code_flix)).join(",") : ""),
     title: title.slice(0, 200),
     kind: kind === "m" ? "movie" : "series",
     genres: kind === "m" ? ["peliculas", "drama"] : ["series", "drama"],
@@ -621,24 +632,12 @@ function humanSlug(slug) {
   return String(slug || "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-// Solo para el registro: pregunta a DoramasFlix qué datos tiene cada serie (por si marca cuáles son en latino).
-let dfProbed = false;
-async function dfProbe() {
-  if (dfProbed) return;
-  dfProbed = true;
-  try {
-    const d = await dfQuery('{a:__type(name:"Dorama"){fields{name}} b:__type(name:"Episode"){fields{name}} c:__schema{queryType{fields{name}}}}');
-    const names = (t) => ((t && t.fields) || []).map((f) => f.name).join(",");
-    const txt = "Dorama=" + names(d.a) + " | Episode=" + names(d.b) + " | Query=" + (((d.c && d.c.queryType && d.c.queryType.fields) || []).map((f) => f.name).join(","));
-    for (let i = 0; i < txt.length && i < 1800; i += 150) log("df esquema: " + txt.slice(i, i + 150));
-  } catch (e) { log("df esquema: no disponible"); }
-}
-
 async function dfEpisodes(spec) {
   const parts = spec.split("|");
   const kind = parts[0], slug = parts[1], id = parts[2];
+  const latTail = parts[3] === undefined ? "" : "|" + parts[3];
   const title = humanSlug(slug);
-  if (kind === "m") return { series: { title }, episodes: [{ season: 1, number: 1, ref: "df|m|" + slug + "|" + id, title }] };
+  if (kind === "m") return { series: { title }, episodes: [{ season: 1, number: 1, ref: "df|m|" + slug + "|" + id + latTail, title }] };
   const season = async (n) => {
     const out = [];
     for (let page = 1; page <= 3; page++) {
@@ -657,7 +656,7 @@ async function dfEpisodes(spec) {
     for (const { n, e } of r.value) {
       if (!e || !e._id) continue;
       const num = Number(e.episode_number) || list.length + 1;
-      list.push({ season: n, number: num, ref: "df|e|" + e._id, title: stripTags(e.name_es || e.name) || tr("Episodio ", "Episode ") + num, poster: dfPoster(e.still_path || e.backdrop) });
+      list.push({ season: n, number: num, ref: "df|e|" + e._id + latTail, title: stripTags(e.name_es || e.name) || tr("Episodio ", "Episode ") + num, poster: dfPoster(e.still_path || e.backdrop) });
     }
   }
   log("df episodes: " + list.length);
@@ -701,6 +700,7 @@ async function dfResolve(spec) {
   const parts = spec.split("|");
   const isMovie = parts[0] === "m";
   const id = isMovie ? parts[2] : parts[1];
+  const latCodes = isMovie ? parts[3] : parts[2];   // idiomas latinos que dijo el sitio (si los dijo)
   const field = isMovie ? "getMovieLinks" : "getEpisodeLinks";
   const d = await dfQuery("{" + field + "(id:" + JSON.stringify(id) + "){links_online{link server lang}}}");
   const raw = (d && d[field] && d[field].links_online) || [];
@@ -709,7 +709,12 @@ async function dfResolve(spec) {
   const all = raw.map((x) => ({ u: dfUnwrap(String((x && x.link) || "")), lang: String((x && x.lang) == null ? "" : x.lang) }))
     .filter((x) => /^https?:\/\//i.test(x.u) && hostOf(x.u).indexOf("primeload") < 0);
   // Por lo visto en los registros: el idioma 38 es el latino y el 13109 el subtitulado.
-  for (const x of all) { x.name = names[x.lang] || (x.lang === "38" ? "Latino" : x.lang === "13109" ? tr("Subtitulado", "Subbed") : ""); x.latino = /lat/i.test(x.name); }
+  const known = latCodes !== undefined;
+  const latList = known ? latCodes.split(",").filter(Boolean) : ["38"];
+  for (const x of all) {
+    x.latino = latList.indexOf(x.lang) >= 0 || /lat/i.test(names[x.lang] || "");
+    x.name = x.latino ? "Latino" : (names[x.lang] || (known || x.lang === "13109" ? tr("Subtitulado", "Subbed") : ""));
+  }
   all.sort((a, b) => ((b.latino ? 1 : 0) - (a.latino ? 1 : 0)) || (rank(a.u) - rank(b.u)));
   log("df resolve: enlaces=" + all.map((x) => hostOf(x.u) + ":lang" + x.lang + (x.name ? "(" + x.name + ")" : "")).join(","));
   const links = all.map((x) => x.u);
@@ -1067,6 +1072,13 @@ function firstSuccess(tasks) {
 }
 
 // Capítulo con varias fuentes: se prueba la primera y, si falla o tarda, se pasa a la siguiente.
+// kino.sleep solo acepta hasta 5000 ms: se espera en tandas.
+async function sleepUpTo(ms) {
+  let left = ms;
+  while (left > 0) { const t = Math.min(left, 4500); await kino.sleep(t); left -= t; }
+  return null;
+}
+
 async function resolveAny(refs) {
   const t0 = Date.now();
   let lastErr = null;
@@ -1077,7 +1089,7 @@ async function resolveAny(refs) {
     const cap = i === refs.length - 1 ? left : Math.min(left, 9000);
     log("resolve: fuente " + (i + 1) + "/" + refs.length + " (" + refs[i].slice(0, 2) + ")");
     const attempt = resolve(refs[i]).catch((e) => { lastErr = e; log("resolve: " + refs[i].slice(0, 2) + " falló"); return null; });
-    const got = canRace ? await Promise.race([attempt, kino.sleep(cap).then(() => null)]) : await attempt;
+    const got = canRace ? await Promise.race([attempt, sleepUpTo(cap)]) : await attempt;
     if (got) return got;
   }
   throw lastErr || kino.error("unavailable", "ninguna fuente entregó el video", {
