@@ -3,7 +3,7 @@
   "name": "DoramaX",
   "description": "K-dramas en español latino, en emisión, K-Dramas, películas.",
   "author": "Ghosti-vc",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "apiVersion": 9,
   "entry": "plugin.js",
   "capabilities": [
@@ -22,7 +22,9 @@
     "image.tmdb.org",
     "pixeldrain.com",
     "user-api.fluxcedene.net",
-    "doramasflix.io"
+    "doramasflix.io",
+    "doramaslat.com",
+    "www.doramaslat.com"
   ],
   "browser": true,
   "fetchHosts": "any",
