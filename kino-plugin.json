@@ -3,7 +3,7 @@
   "name": "DoramaX",
   "description": "K-dramas en español latino, en emisión, K-Dramas, películas.",
   "author": "Ghosti-vc",
-  "version": "1.5.8",
+  "version": "1.5.10",
   "apiVersion": 9,
   "entry": "plugin.js",
   "capabilities": [
