@@ -101,6 +101,7 @@ const SECTIONS = {
   latino: { genre: "series", parts: [
     { site: "td", path: "/genero/espanol-latino/" },
     { site: "dy", path: "/buscar?q=latino" },   // sus series en latino llevan "latino" en el nombre
+    { site: "dl", path: "/tvshows/" },            // todo DoramasLat es en latino
     { site: "df", kind: "d", latOnly: true },     // DoramasFlix: solo las que traen idioma latino
   ] },
   emision: { genre: "series", parts: [
@@ -113,6 +114,7 @@ const SECTIONS = {
   ] },
   peliculas: { genre: "peliculas", parts: [
     { site: "td", path: "/genero/peliculas/" },
+    { site: "dl", path: "/movies/" },
     { site: "df", kind: "m" },
   ] },
 };
@@ -382,7 +384,7 @@ export async function search(query) {
   const [a, b, c, f] = await Promise.allSettled([
     getHtml(TD + "/?s=" + enc).then(cards).then((r) => (r.length ? r : tdDirect().catch(() => []))),
     getHtml(DY + "/buscar?q=" + enc).then(dyCards),
-    Promise.resolve([]),   // DoramasLat quitado: pide verificación
+    getHtml(DL + "/?s=" + enc).then(dlCards).then((r) => (r.length ? r : dlDirect().catch(() => []))),
     dfSearch(),
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected" && f.status === "rejected") throw a.reason;
