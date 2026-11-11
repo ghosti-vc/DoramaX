@@ -499,8 +499,11 @@ async function dyResolve(url) {
   if (!btns.length) throw kino.error("unavailable", "sin servidores", {
     userMessage: tr("Este capítulo no trae servidores disponibles.", "This episode has no servers available."),
   });
-  const rank = (b) => { const i = DY_RANK.indexOf(b.name); return i < 0 ? 50 : i; };
-  const cands = btns.filter((b) => b.name !== "mega").sort((a, b) => rank(a) - rank(b)).slice(0, 4);
+  // Orden según lo que de verdad ha abierto en Kino (mp4upload, ok.ru, uqload) y al final los que casi siempre piden
+  // verificación o no cargan (doodstream, filemoon/byse, mixdrop, lulu).
+  const DY_OK = ["mp4upload", "ok", "uqload", "savefiles", "voe", "streamtape", "embedwish", "lulu", "mxdrop", "mixdrop", "doodstream", "filemoon"];
+  const rank = (b) => { const i = DY_OK.findIndex((n) => (n === "ok" ? b.name === "ok" : b.name.indexOf(n) === 0)); return i < 0 ? 40 : i; };
+  const cands = btns.filter((b) => b.name !== "mega").sort((a, b) => rank(a) - rank(b)).slice(0, 6);
   const lat = /-latino-/i.test(url);
   const label = (b) => (lat ? "Latino" : tr("Subtitulado", "Subbed")) + " · " + b.name;
   // El reproductor de la página es un iframe a /reproductor?video=<código>&player=<nombre>.
