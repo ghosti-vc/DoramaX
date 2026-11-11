@@ -101,7 +101,6 @@ const SECTIONS = {
   latino: { genre: "series", parts: [
     { site: "td", path: "/genero/espanol-latino/" },
     { site: "dy", path: "/buscar?q=latino" },   // sus series en latino llevan "latino" en el nombre
-    { site: "dl", path: "/tvshows/" },            // todo DoramasLat es en latino
     { site: "df", kind: "d", latOnly: true },     // DoramasFlix: solo las que traen idioma latino
   ] },
   emision: { genre: "series", parts: [
@@ -114,7 +113,6 @@ const SECTIONS = {
   ] },
   peliculas: { genre: "peliculas", parts: [
     { site: "td", path: "/genero/peliculas/" },
-    { site: "dl", path: "/movies/" },
     { site: "df", kind: "m" },
   ] },
 };
@@ -384,7 +382,7 @@ export async function search(query) {
   const [a, b, c, f] = await Promise.allSettled([
     getHtml(TD + "/?s=" + enc).then(cards).then((r) => (r.length ? r : tdDirect().catch(() => []))),
     getHtml(DY + "/buscar?q=" + enc).then(dyCards),
-    getHtml(DL + "/?s=" + enc).then(dlCards).then((r) => (r.length ? r : dlDirect().catch(() => []))),
+    Promise.resolve([]),   // DoramasLat quitado: pide verificación
     dfSearch(),
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected" && f.status === "rejected") throw a.reason;
@@ -444,13 +442,41 @@ async function dyEpisodes(url) {
   const h1 = /<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html);
   const og = /property=["']og:image["'][^>]*content=["']([^"']+)["']/i.exec(html);
   const title = h1 ? stripTags(h1[1]).replace(/^Ver\s+/i, "").replace(/\s+(online|en español).*$/i, "") : url;
+  const full = (u) => { u = String(u || "").trim(); return u.charAt(0) === "/" ? DY + u : absUrl(u); };
   const eps = new Map();
+  const add = (u, n) => {
+    u = full(u);
+    const num = Number(n) || Number((/-episodio-(\d+)/.exec(u) || [])[1]);
+    if (!u || !num || eps.has(u)) return;
+    eps.set(u, { season: 1, number: num, ref: "dy|" + u, title: tr("Episodio ", "Episode ") + num });
+  };
+  // La página trae pocos capítulos escritos; la lista completa se pide aparte (como hace su propia página).
+  try {
+    const csrf = /<meta[^>]+name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i.exec(html);
+    const sec = /<section[^>]*class=["'][^"']*caplist[^"']*["'][^>]*>/i.exec(html);
+    const ajaxUrl = sec ? attr(sec[0], "data-ajax") : "";
+    if (csrf && ajaxUrl) {
+      const post = async (u, fields) => {
+        const r = await kino.fetch(full(u), { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest", Referer: url, Accept: "application/json" }, body: formBody(fields) });
+        if (!r.ok) throw new Error("status " + r.status);
+        return JSON.parse(await r.text());
+      };
+      const meta = await post(ajaxUrl, { _token: csrf[1] });
+      const total = (meta.eps || []).length;
+      const per = Number(meta.perpage) || 50;
+      const pages = Math.min(Math.ceil(total / per), 12);
+      log("dy caplist: total=" + total + " por página=" + per);
+      if (meta.paginate_url) {
+        const nums = [];
+        for (let i = 1; i <= pages; i++) nums.push(i);
+        const res = await Promise.allSettled(nums.map((i) => post(meta.paginate_url, { _token: csrf[1], p: i })));
+        for (const r of res) if (r.status === "fulfilled") for (const c of (r.value.caps || [])) add(c.url, c.episodio);
+      }
+    }
+  } catch (e) { log("dy caplist falló: " + String((e && e.message) || e).slice(0, 80)); }
   const re = /href=["'](https:\/\/www\.doramasyt\.com\/ver\/[a-z0-9-]+-episodio-(\d+))["']/gi;
   let m;
-  while ((m = re.exec(html))) {
-    if (eps.has(m[1])) continue;
-    eps.set(m[1], { season: 1, number: Number(m[2]), ref: "dy|" + m[1], title: tr("Episodio ", "Episode ") + m[2] });
-  }
+  while ((m = re.exec(html))) add(m[1], m[2]);
   log("dy episodes: " + eps.size);
   if (!eps.size) throw kino.error("not_found", "no se encontró la lista de episodios", {
     userMessage: tr("No se encontró la lista de capítulos de este título.", "No episode list found for this title."),
