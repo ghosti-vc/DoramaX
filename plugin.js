@@ -219,7 +219,7 @@ export async function home() {
 async function partPage(part, n) {
   if (part.site === "df") {
     const field = part.kind === "m" ? "paginationMovie" : "paginationDorama";
-    const d = await dfQueryL((L) => "query C($page:Int,$limit:Int){" + field + "(page:$page,limit:$limit){pageInfo{hasNextPage} items{_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "}}}", { page: n, limit: part.latOnly ? 48 : 24 });
+    const d = await dfQueryL((L) => "query C($page:Int,$limit:Int){" + field + "(page:$page,limit:$limit){pageInfo{hasNextPage} items{_id slug name name_es poster_path poster" + (L ? " langs{" + L + "}" : "") + "}}}", { page: n, limit: part.latOnly ? 48 : 24 });
     const o = (d && d[field]) || {};
     let items = (o.items || []).map((x) => dfItem(x, part.kind)).filter(Boolean);
     if (part.latOnly) items = items.filter((x) => /\|[0-9]+(,[0-9]+)*$/.test(x.ref));
@@ -376,7 +376,7 @@ export async function search(query) {
     return [];
   };
   const dfSearch = async () => {
-    const d = await dfQueryL((L) => "query S($input:String,$limit:Int){searchDorama(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "} searchMovie(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{code_flix name}" : "") + "}}", { input: qa, limit: 20 });
+    const d = await dfQueryL((L) => "query S($input:String,$limit:Int){searchDorama(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{" + L + "}" : "") + "} searchMovie(input:$input,limit:$limit){_id slug name name_es poster_path poster" + (L ? " langs{" + L + "}" : "") + "}}", { input: qa, limit: 20 });
     return ((d && d.searchDorama) || []).map((x) => dfItem(x, "d")).concat(((d && d.searchMovie) || []).map((x) => dfItem(x, "m"))).filter(Boolean);
   };
   const [a, b, c, f] = await Promise.allSettled([
@@ -420,6 +420,7 @@ async function ajax(params, referer) {
     });
   }
   log("ajax " + params.action + " status=" + r.status);
+  if (!r.ok) { try { log("df api error: " + String(await r.text()).replace(/\s+/g, " ").slice(0, 200)); } catch (e) { /* sin cuerpo */ } }
   if (!r.ok) throw kino.error(r.status === 429 ? "rate_limited" : "unavailable", "ajax " + r.status);
   const txt = await r.text();
   try { return JSON.parse(txt); } catch (e) {
@@ -597,13 +598,20 @@ async function dlResolve(url) {
 
 // ---- DoramasFlix: usa su API pública (GraphQL) ------------------------------------------------
 
-let dfNoLangs = false;
-// Pide también los idiomas de cada título; si el sitio no los acepta, repite la consulta sin ellos.
+// Pide también los idiomas de cada título (probando cómo se llaman sus campos); si no se puede, sigue sin ellos.
+const DF_LANG_SELS = ["code_flix name", "code name", "code_flix", "code"];
+let dfLangSel;
 async function dfQueryL(make, variables) {
-  if (!dfNoLangs) {
-    try { return await dfQuery(make(true), variables); } catch (e) { dfNoLangs = true; log("df: sin idiomas en la lista"); }
+  if (dfLangSel === undefined) {
+    for (const sel of DF_LANG_SELS) {
+      try { const d = await dfQuery(make(sel), variables); dfLangSel = sel; log("df: idiomas con campos " + sel); return d; } catch (e) { /* se prueba el siguiente */ }
+    }
+    dfLangSel = "";
+    log("df: sin idiomas en la lista");
+  } else if (dfLangSel) {
+    return dfQuery(make(dfLangSel), variables);
   }
-  return dfQuery(make(false), variables);
+  return dfQuery(make(""), variables);
 }
 
 async function dfQuery(query, variables) {
@@ -646,7 +654,7 @@ function dfItem(x, kind) {
   if (!title) return null;
   return {
     id: "df-" + String(x.slug).slice(0, 80),
-    ref: "df|" + kind + "|" + x.slug + "|" + x._id + (Array.isArray(x.langs) ? "|" + x.langs.filter((l) => l && /lat/i.test(String(l.name || ""))).map((l) => String(l.code_flix)).join(",") : ""),
+    ref: "df|" + kind + "|" + x.slug + "|" + x._id + (Array.isArray(x.langs) ? "|" + x.langs.filter((l) => l && /lat/i.test(String(l.name || ""))).map((l) => String(l.code_flix != null ? l.code_flix : l.code)).join(",") : ""),
     title: title.slice(0, 200),
     kind: kind === "m" ? "movie" : "series",
     genres: kind === "m" ? ["peliculas", "drama"] : ["series", "drama"],
@@ -893,7 +901,8 @@ const MEDIA_RE = /["'`]((?:https?:)?\/\/[^"'`\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"'`\s
 // Videos de prueba que traen los reproductores y sus librerías (Big Buck Bunny y compañía).
 // Nunca son el capítulo: se descartan para no mostrarlos por error.
 const DEMO_MEDIA = /big[_-]?buck[_-]?bunny|\bbbb[_-]|sintel|elephants?[_-]?dream|tears[_-]?of[_-]?steel|gtv-videos-bucket|commondatastorage|test-?streams|bitdash|bitmovin|mux\.dev|zencdn|oceans\.mp4|flowplayer\.com|jwplatform|\/samples?\/|(?:googleapis|gstatic|jsdelivr|cdnjs|unpkg)\./i;
-const isDemo = (u) => DEMO_MEDIA.test(String(u || ""));
+// Los enlaces de streamtape.com/e/... son la página del reproductor (no el video) y el sitio responde 403: se descartan.
+const isDemo = (u) => DEMO_MEDIA.test(String(u || "")) || /streamtape\.[a-z]+\/e\//i.test(String(u || ""));
 
 function normText(s) {
   return String(s || "").replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
@@ -1035,6 +1044,22 @@ function diag(html, depth, found) {
 // página abre (hasta 2 niveles), porque el de TuDorama suele ser solo una envoltura.
 const innerHosts = new Map(); // envoltura -> a qué reproductores apunta
 
+// ok.ru guarda el video en un bloque de datos de su página ("hlsManifestUrl" o la lista de calidades).
+function okruMedia(html) {
+  const t = String(html || "").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+  const clean = (u) => String(u).replace(/\\+u0026/gi, "&").replace(/\\+\//g, "/");
+  for (const key of ["hlsManifestUrl", "ondemandHls", "hlsMasterPlaylistUrl"]) {
+    const m = new RegExp('\\\\*"' + key + '\\\\*"\\s*:\\s*\\\\*"(https?:[^"]*?)\\\\*"').exec(t);
+    if (m) return clean(m[1]);
+  }
+  const order = ["ultra", "quad", "full", "hd", "sd", "low", "lowest", "mobile"];
+  let best = "", bestRank = 99;
+  const re = /\\*"name\\*"\s*:\s*\\*"([a-z]+)\\*"\s*,\s*\\*"url\\*"\s*:\s*\\*"(https?:[^"]*?)\\*"/g;
+  let m;
+  while ((m = re.exec(t))) { const i = order.indexOf(m[1]); const rk = i < 0 ? 50 : i; if (rk < bestRank) { bestRank = rk; best = clean(m[2]); } }
+  return best;
+}
+
 async function embedFromHtml(embedUrl, depth, referer) {
   const d = depth || 0;
   const r = await kino.fetch(embedUrl, { headers: { Referer: referer || TD + "/" } });
@@ -1042,6 +1067,7 @@ async function embedFromHtml(embedUrl, depth, referer) {
   if (!r.ok) return null;
   let html = await r.text();
   let u = deepMedia(html);
+  if (!u && /(^|\.)ok\.ru$/i.test(hostOf(embedUrl))) { u = okruMedia(html); if (u) log("ok.ru: video encontrado"); }
   if (d === 0) innerHosts.set(embedUrl, embedLinks(html, embedUrl).map(hostOf));
   // Una página diminuta, sin video ni enlaces, suele ser una pantalla de comprobación del servidor:
   // con la cookie que acaba de dejar, el segundo intento trae la página real. Un solo reintento.
