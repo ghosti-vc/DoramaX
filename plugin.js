@@ -1136,6 +1136,17 @@ function withTimeout(p, ms) {
 }
 
 // Un video HLS solo vale si su lista de reproducción abre de verdad (hay servidores que entregan enlaces que luego fallan).
+let softPool = [];
+function streamtapeMedia(html) {
+  const t = String(html || "");
+  const re = /['"]((?:https?:)?\/\/[^'"\s]*get_video\?[^'"\s]*)['"]\s*\+\s*\(\s*['"]([^'"]*)['"]\s*\)\.substring\(\s*(\d+)\s*\)/g;
+  let m, last = null;
+  while ((m = re.exec(t))) last = m;
+  if (!last) return null;
+  const a = last[1].indexOf("//") === 0 ? "https:" + last[1] : last[1];
+  return a + last[2].substring(Number(last[3]));
+}
+
 async function verifyMedia(m) {
   if (!/mpegurl/i.test(String(m && m.mime))) return true;
   try {
@@ -1153,6 +1164,7 @@ async function embedFromHtml(embedUrl, depth, referer) {
   if (!r.ok) return null;
   let html = await r.text();
   let u = deepMedia(html);
+  if (!u && /streamtape/i.test(hostOf(embedUrl))) { u = streamtapeMedia(html); if (u) log("streamtape: video encontrado"); }
   if (!u && /(^|\.)ok\.ru$/i.test(hostOf(embedUrl))) { u = okruMedia(html); if (u) log("ok.ru: video encontrado"); }
   if (d === 0) innerHosts.set(embedUrl, embedLinks(html, embedUrl).map(hostOf));
   // Una página diminuta, sin video ni enlaces, suele ser una pantalla de comprobación del servidor:
@@ -1170,7 +1182,12 @@ async function embedFromHtml(embedUrl, depth, referer) {
   if (u) {
     log("embed[" + d + "] video elegido: " + hostOf(u) + pathShape(u));
     const found = { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: playHeaders(embedUrl) };
-    if (!(await verifyMedia(found))) { log("embed[" + d + "] el video de " + hostOf(u) + " no abre, se descarta"); return null; }
+    if (!(await verifyMedia(found))) {
+      // No se tira: queda de reserva por si ningún otro servidor abre (la comprobación puede fallar aunque el reproductor sí abra).
+      log("embed[" + d + "] el video de " + hostOf(u) + " no se pudo comprobar, queda de reserva");
+      if (!/dood|mixdrop|netu|waaw|hqq|nupload/i.test(hostOf(u))) softPool.push(Object.assign({ label: hostOf(embedUrl) }, found));
+      return null;
+    }
     return found;
   }
   if (d >= 2) return null;
@@ -1232,7 +1249,7 @@ async function resolveAny(refs) {
   const launch = (r) => {
     pending++;
     log("resolve: fuente " + (next) + "/" + refs.length + " (" + r.slice(0, 2) + ")");
-    resolve(r).then((v) => {
+    resolveInner(r).then((v) => {
       if (!v) return;
       const k = rankOf(v);
       if (!winner || k < winner.k) { winner = { v, k }; if (!winAt) winAt = Date.now(); }
@@ -1263,6 +1280,21 @@ async function resolveAny(refs) {
 }
 
 export async function resolve(ref) {
+  await null;
+  softPool = [];
+  try {
+    return await resolveInner(ref);
+  } catch (e) {
+    if (softPool.length) {
+      const v = softPool[0];
+      log("resolve: se entrega el video de reserva (" + v.label + ")");
+      return v;
+    }
+    throw e;
+  }
+}
+
+async function resolveInner(ref) {
   await null;
   const t0 = Date.now();
   const raw = String(ref || "");
