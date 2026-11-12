@@ -265,16 +265,21 @@ function mergeDupes(items) {
     g.push(x);
   }
   const fix = (x) => Object.assign({}, x, { title: plainTitle(x.title) || x.title });
+  // Cada tarjeta recuerda su título: al abrir un capítulo se buscan las demás fuentes por ese título.
+  const tag = (x) => {
+    const refs = x.ref.startsWith("mx|") ? x.ref.slice(3).split("||") : [x.ref];
+    return Object.assign({}, x, { ref: "mx|" + refs.join("||") + "||tt:" + encodeURIComponent(x.title) + ":" + (x.kind === "movie" ? "m" : "s") });
+  };
   return order.map((k) => {
     const g = groups.get(k);
-    if (g.length === 1) return fix(g[0]);
+    if (g.length === 1) return tag(fix(g[0]));
     g.sort((a, b) => (SRC_PRIO[a.ref.slice(0, 2)] || 0) - (SRC_PRIO[b.ref.slice(0, 2)] || 0));
     const first = Object.assign({}, g[0]);
     if (!first.poster) { const p = g.find((y) => y.poster); if (p) first.poster = p.poster; }
     const refs = [];
     for (const y of g) if (refs.indexOf(y.ref) < 0) refs.push(y.ref);
     if (refs.length > 1) first.ref = "mx|" + refs.join("||");
-    return fix(first);
+    return tag(fix(first));
   });
 }
 
@@ -350,11 +355,13 @@ export async function categories() {
   });
 }
 
-export async function search(query) {
-  await null;
-  const q = stripTags(query && query.q).slice(0, 100);
-  if (!q) return [];
-  const qa = q.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[¡!¿?:,.]/g, " ").replace(/\s+/g, " ").trim() || q;
+const deadUntil = {};
+// Si una fuente falla, se salta 3 minutos para que la búsqueda no se alargue.
+const guard = (name, fn) => (deadUntil[name] > Date.now()
+  ? Promise.reject(new Error("fuente saltada"))
+  : Promise.resolve().then(fn).catch((e) => { deadUntil[name] = Date.now() + 3 * 60 * 1000; throw e; }));
+
+async function searchRaw(qa) {
   const enc = encodeURIComponent(qa);
   const slug = qa.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   // Si el buscador de DoramasLat no la encuentra, se prueba la dirección directa de la serie.
@@ -389,10 +396,10 @@ export async function search(query) {
     return ((d && d.searchDorama) || []).map((x) => dfItem(x, "d")).concat(((d && d.searchMovie) || []).map((x) => dfItem(x, "m"))).filter(Boolean);
   };
   const [a, b, c, f] = await Promise.allSettled([
-    getHtml(TD + "/?s=" + enc).then(cards).then((r) => (r.length ? r : tdDirect().catch(() => []))),
-    getHtml(DY + "/buscar?q=" + enc).then(dyCards),
-    getHtml(DL + "/?s=" + enc).then(dlCards).then((r) => (r.length ? r : dlDirect().catch(() => []))),
-    dfSearch(),
+    guard("td", () => getHtml(TD + "/?s=" + enc).then(cards).then((r) => (r.length ? r : tdDirect().catch(() => [])))),
+    guard("dy", () => getHtml(DY + "/buscar?q=" + enc).then(dyCards)),
+    guard("dl", () => getHtml(DL + "/?s=" + enc).then(dlCards).then((r) => (r.length ? r : dlDirect().catch(() => [])))),
+    guard("df", () => dfSearch()),
   ]);
   if (a.status === "rejected" && b.status === "rejected" && c.status === "rejected" && f.status === "rejected") throw a.reason;
   const all = [];
@@ -400,6 +407,15 @@ export async function search(query) {
     if (r.status !== "fulfilled") { log("búsqueda: una fuente falló"); continue; }
     for (const x of r.value) all.push(x);
   }
+  return all;
+}
+
+export async function search(query) {
+  await null;
+  const q = stripTags(query && query.q).slice(0, 100);
+  if (!q) return [];
+  const qa = q.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[¡!¿?:,.]/g, " ").replace(/\s+/g, " ").trim() || q;
+  const all = await searchRaw(qa);
   log("búsqueda: " + all.length + " resultados");
   return mergeDupes(all).slice(0, MAX_RESULTS);
 }
@@ -786,13 +802,42 @@ async function dfResolve(spec) {
   });
 }
 
+// Separa las fuentes del título y, si faltan fuentes, busca el mismo título en las que aún no están.
+async function expandRefs(raw) {
+  const parts = raw.slice(3).split("||").filter(Boolean);
+  const refs = parts.filter((x) => x.indexOf("tt:") !== 0);
+  const tt = parts.find((x) => x.indexOf("tt:") === 0);
+  const have = new Set(refs.map((r) => r.slice(0, 2)));
+  if (tt && have.size < 4) {
+    const tp = tt.split(":");
+    let title = "";
+    try { title = decodeURIComponent(tp[1] || ""); } catch (e) { /* sin título */ }
+    const qa = title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[¡!¿?:,.]/g, " ").replace(/\s+/g, " ").trim();
+    const want = normTitle(title);
+    if (qa && want) {
+      try {
+        const found = await withTimeout(searchRaw(qa), 7000);
+        for (const it of found) {
+          const src = it.ref.slice(0, 2);
+          if (have.has(src) || (it.kind === "movie") !== (tp[2] === "m") || normTitle(it.title) !== want) continue;
+          have.add(src);
+          refs.push(it.ref);
+        }
+      } catch (e) { log("buscar en otras fuentes falló: " + String((e && e.message) || e).slice(0, 60)); }
+    }
+  }
+  refs.sort((a, b) => (SRC_PRIO[a.slice(0, 2)] || 0) - (SRC_PRIO[b.slice(0, 2)] || 0));
+  log("fuentes para este título: " + refs.map((r) => r.slice(0, 2)).join(","));
+  return refs.slice(0, 6);
+}
+
 export async function episodes(ref) {
   await null;
   const raw = String(ref || "");
   // Tarjeta combinada: se piden las listas de todas las fuentes a la vez y gana la que tenga más capítulos.
   if (raw.startsWith("mx|")) {
-    const refs = raw.slice(3).split("||").filter(Boolean).slice(0, 4);
-    const res = await Promise.allSettled(refs.map((r) => episodes(r)));
+    const refs = await expandRefs(raw);
+    const res = await Promise.allSettled(refs.map((r) => withTimeout(episodes(r), 14000)));
     let best = null;
     let bestI = -1;
     res.forEach((r, i) => {
@@ -1072,6 +1117,35 @@ function okruMedia(html) {
   return best;
 }
 
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+// Cabeceras con las que el reproductor pide el video: muchos servidores responden 403 si falta el origen o el navegador.
+function playHeaders(pageUrl) {
+  const m = /^(https?:\/\/[^\/?#]+)/i.exec(String(pageUrl || ""));
+  const h = { Referer: pageUrl, "User-Agent": UA };
+  if (m) h.Origin = m[1];
+  return h;
+}
+
+// Corta una tarea que tarda demasiado (kino.sleep solo acepta hasta 5000 ms: se espera en tandas).
+function withTimeout(p, ms) {
+  if (typeof kino.sleep !== "function") return p;
+  const stop = sleepUpTo(ms).then(() => { throw new Error("tardó demasiado"); });
+  stop.catch(() => {});
+  return Promise.race([Promise.resolve(p), stop]);
+}
+
+// Un video HLS solo vale si su lista de reproducción abre de verdad (hay servidores que entregan enlaces que luego fallan).
+async function verifyMedia(m) {
+  if (!/mpegurl/i.test(String(m && m.mime))) return true;
+  try {
+    const r = await withTimeout(kino.fetch(m.url, { headers: m.headers || {} }), 4500);
+    if (!r.ok) return false;
+    const t = await r.text();
+    return /#EXTM3U/.test(String(t).slice(0, 400));
+  } catch (e) { return false; }
+}
+
 async function embedFromHtml(embedUrl, depth, referer) {
   const d = depth || 0;
   const r = await kino.fetch(embedUrl, { headers: { Referer: referer || TD + "/" } });
@@ -1095,7 +1169,9 @@ async function embedFromHtml(embedUrl, depth, referer) {
   diag(html, d, !!u);
   if (u) {
     log("embed[" + d + "] video elegido: " + hostOf(u) + pathShape(u));
-    return { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: { Referer: embedUrl } };
+    const found = { url: u, mime: /\.m3u8/i.test(u) ? "application/x-mpegurl" : "video/mp4", headers: playHeaders(embedUrl) };
+    if (!(await verifyMedia(found))) { log("embed[" + d + "] el video de " + hostOf(u) + " no abre, se descarta"); return null; }
+    return found;
   }
   if (d >= 2) return null;
   const links = embedLinks(html, embedUrl).filter((l) => !/byse/i.test(hostOf(l))).slice(0, d === 0 ? 3 : 2);
@@ -1145,18 +1221,40 @@ async function sleepUpTo(ms) {
 
 async function resolveAny(refs) {
   const t0 = Date.now();
+  const left = () => 17000 - (Date.now() - t0);
   let lastErr = null;
-  const canRace = typeof kino.sleep === "function";
-  for (let i = 0; i < refs.length; i++) {
-    const left = 19000 - (Date.now() - t0);
-    if (left < 3500) break;
-    const cap = i === refs.length - 1 ? left : Math.min(left, 9000);
-    log("resolve: fuente " + (i + 1) + "/" + refs.length + " (" + refs[i].slice(0, 2) + ")");
-    const attempt = resolve(refs[i]).catch((e) => { lastErr = e; log("resolve: " + refs[i].slice(0, 2) + " falló"); return null; });
-    const got = canRace ? await Promise.race([attempt, sleepUpTo(cap)]) : await attempt;
-    if (got) return got;
+  let winner = null;
+  let pending = 0;
+  let next = 0;
+  let lastLaunch = 0;
+  let winAt = 0;
+  const rankOf = (v) => (/^Latino/i.test(String((v && v.label) || "")) ? 0 : 1);
+  const launch = (r) => {
+    pending++;
+    log("resolve: fuente " + (next) + "/" + refs.length + " (" + r.slice(0, 2) + ")");
+    resolve(r).then((v) => {
+      if (!v) return;
+      const k = rankOf(v);
+      if (!winner || k < winner.k) { winner = { v, k }; if (!winAt) winAt = Date.now(); }
+    }).catch((e) => { lastErr = e; log("resolve: " + r.slice(0, 2) + " falló"); }).then(() => { pending--; });
+  };
+  // Las fuentes arrancan una tras otra (cada 4 s o en cuanto la anterior falla) sin soltar las anteriores;
+  // gana el primer Latino. Si llega antes un Subtitulado, se da un momento a que termine un Latino pendiente.
+  while (left() > 800) {
+    const settle = Math.max(winAt, lastLaunch);
+    if (winner) {
+      if (winner.k === 0) break;
+      if (next < refs.length && left() > 6000) { launch(refs[next++]); lastLaunch = Date.now(); continue; }
+      if (pending === 0 || Date.now() - settle > 6000) break;
+    } else if (next < refs.length && (pending === 0 || Date.now() - lastLaunch > 4000)) {
+      launch(refs[next++]);
+      lastLaunch = Date.now();
+      continue;
+    } else if (pending === 0 && next >= refs.length) break;
+    await kino.sleep(250);
   }
-  throw lastErr || kino.error("unavailable", "ninguna fuente entregó el video", {
+  if (winner) return winner.v;
+  throw lastErr && lastErr.code ? lastErr : kino.error("unavailable", "ninguna fuente entregó el video", {
     userMessage: tr(
       "Ningún servidor de este capítulo se pudo abrir desde aquí. Prueba otro capítulo o título.",
       "No server for this episode could be opened from here. Try another episode or title."
@@ -1168,7 +1266,7 @@ export async function resolve(ref) {
   await null;
   const t0 = Date.now();
   const raw = String(ref || "");
-  if (raw.startsWith("mx|")) return resolveAny(raw.slice(3).split("||").filter(Boolean).slice(0, 3));
+  if (raw.startsWith("mx|")) return resolveAny(raw.slice(3).split("||").filter((x) => x && x.indexOf("tt:") !== 0).slice(0, 6));
   if (raw.startsWith("df|")) return dfResolve(raw.slice(3));
   if (raw.startsWith("dl|")) return dlResolve(raw.slice(3));
   if (raw.startsWith("dy|")) return dyResolve(raw.slice(3));
@@ -1215,10 +1313,10 @@ export async function resolve(ref) {
   // (byse, hgcloud) ni a Abyss, porque con esos casi nunca ve el video.
   const weak = (x) => {
     const l = absUrl(x.link || x.url);
-    return /abyss/i.test(l) || /byse|hgcloud|abyss/i.test((innerHosts.get(l) || []).join(","));
+    return /abyss|dood|mixdrop|susanexpect|nupload|waaw|hqq|netu/i.test(l) || /byse|hgcloud|abyss|dood|mixdrop|nupload/i.test((innerHosts.get(l) || []).join(","));
   };
   const runCapture = async () => {
-    const left = 18000 - (Date.now() - t0);
+    const left = 17000 - (Date.now() - t0);
     const fe = embedAll.find((x) => !weak(x)) || embedAll[0];
     if (!fe || left < 5000) return null;
     try {
@@ -1244,7 +1342,7 @@ export async function resolve(ref) {
     }
 
     if (isDirect(x)) {
-      return { url: link, mime: /\.m3u8(\?|$)/i.test(link) ? "application/x-mpegurl" : "video/mp4", label: label(x), headers: { Referer: TD + "/" } };
+      return { url: link, mime: /\.m3u8(\?|$)/i.test(link) ? "application/x-mpegurl" : "video/mp4", label: label(x), headers: playHeaders(TD + "/") };
     }
 
     if (embedsDone) continue;
@@ -1260,12 +1358,12 @@ export async function resolve(ref) {
       ));
       let winner = null;
       if (browserOk && !hasLater && !captureStarted) {
-        const first = await Promise.race([staticP, kino.sleep(4000).then(() => "slow")]);
+        const first = await Promise.race([staticP, kino.sleep(3000).then(() => "slow")]);
         if (first && first !== "slow") {
           winner = first.v;
         } else if (first === "slow") {
           captureStarted = true;
-          log("resolve: 4 s sin video, el navegador oculto arranca en paralelo");
+          log("resolve: 3 s sin video, el navegador oculto arranca en paralelo");
           const both = await firstSuccess([staticP.then((r) => (r ? r.v : null)), runCapture()]);
           winner = both ? both.v : null;
         }
